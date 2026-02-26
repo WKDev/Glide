@@ -145,3 +145,48 @@ If you have questions or need help, feel free to:
 - Review the [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
 Happy contributing! 🚀
+
+## Release & Signing
+
+wkgrip uses [Tauri's update signing](https://tauri.app/plugin/updater/) to verify update authenticity. Maintainers need a signing key pair to publish releases.
+
+### Generating a Signing Key
+
+```bash
+pnpm tauri signer generate -w ~/.tauri/wkgrip.key
+```
+
+This creates two files:
+
+- `~/.tauri/wkgrip.key` — **private key** (keep secret, never commit)
+- `~/.tauri/wkgrip.key.pub` — **public key** (safe to share)
+
+### Configuring GitHub Secrets
+
+In your GitHub repository settings, add the following secrets:
+
+| Secret                               | Value                                                            |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Full content of `~/.tauri/wkgrip.key`                            |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password you entered during key generation (leave empty if none) |
+
+### Updating the Public Key
+
+Replace `UPDATER_PUBKEY_PLACEHOLDER` in `src-tauri/tauri.conf.json` with the full content of `~/.tauri/wkgrip.key.pub`:
+
+```json
+"plugins": {
+  "updater": {
+    "pubkey": "<paste full content of wkgrip.key.pub here>",
+    ...
+  }
+}
+```
+
+### Publishing a Release
+
+1. Create a GitHub Release and **publish it** (do not leave as draft)
+2. The release workflow will automatically build and attach the NSIS installer and `latest.json` update manifest
+3. Users running wkgrip will detect the update on next launch
+
+> ⚠️ **Important**: Draft releases are **not** detected by the auto-updater. You must publish the release for updates to be distributed.

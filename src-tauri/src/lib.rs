@@ -1,6 +1,8 @@
 mod commands;
 mod config;
 mod hook;
+mod overlay;
+mod snap;
 mod window_manager;
 
 use std::sync::Arc;
@@ -15,6 +17,8 @@ use tauri::{
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_store::StoreExt;
+#[cfg(target_os = "windows")]
+use window_vibrancy::apply_mica;
 
 pub fn run() {
     env_logger::init();
@@ -25,7 +29,18 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(error) = apply_mica(&window, None) {
+                        log::warn!("failed to apply mica: {}", error);
+                    }
+                }
+            }
+
             // Load config from store or use default
             let config = load_config(app);
             let config = Arc::new(Mutex::new(config));
