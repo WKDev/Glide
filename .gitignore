@@ -15,3 +15,10 @@ src-tauri/target/
 
 # Windows special files
 nul
+
+# QA evidence files
+.sisyphus/evidence/
+
+# Build artifacts
+*.exe
+*.msi

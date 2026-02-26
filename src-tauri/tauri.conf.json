@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wkgrip",
-  "version": "0.1.0",
+  "version": "../package.json",
   "identifier": "com.wklabs.wkgrip",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -14,9 +14,11 @@
       {
         "label": "main",
         "title": "wkgrip Settings",
-        "width": 540,
-        "height": 680,
+        "width": 560,
+        "height": 640,
         "visible": false,
+        "transparent": true,
+        "decorations": true,
         "resizable": false,
         "center": true
       }
@@ -27,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
