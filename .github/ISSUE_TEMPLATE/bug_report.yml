@@ -1,0 +1,33 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: 'Thanks for reporting! Please fill out the details below.'
+  - type: input
+    id: version
+    attributes:
+      label: wkgrip version
+      placeholder: 'e.g. 0.1.0'
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: 'e.g. Windows 11 22H2'
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
