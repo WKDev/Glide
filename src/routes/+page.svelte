@@ -217,7 +217,7 @@
                     <span class="select-caret">▾</span>
                   </Select.Trigger>
                   <Select.Content class="select-content" sideOffset={4}>
-                    {#each MODIFIER_OPTIONS as opt}
+                    {#each MODIFIER_OPTIONS as opt (opt.value)}
                       <Select.Item
                         class="select-item"
                         value={opt.value}
@@ -245,7 +245,7 @@
                       <span class="select-caret">▾</span>
                     </Select.Trigger>
                     <Select.Content class="select-content" sideOffset={4}>
-                      {#each MODIFIER_OPTIONS as opt}
+                      {#each MODIFIER_OPTIONS as opt (opt.value)}
                         <Select.Item
                           class="select-item"
                           value={opt.value}
@@ -267,7 +267,7 @@
                       <span class="select-caret">▾</span>
                     </Select.Trigger>
                     <Select.Content class="select-content" sideOffset={4}>
-                      {#each MODIFIER_OPTIONS as opt}
+                      {#each MODIFIER_OPTIONS as opt (opt.value)}
                         <Select.Item
                           class="select-item"
                           value={opt.value}
@@ -402,7 +402,7 @@
                         No running process available
                       </div>
                     {:else}
-                      {#each selectableRunningProcesses as proc}
+                      {#each selectableRunningProcesses as proc (proc)}
                         <Select.Item
                           class="select-item"
                           value={proc}
@@ -420,7 +420,7 @@
               </div>
 
               <div class="pill-list">
-                {#each config.filter_list as proc}
+                {#each config.filter_list as proc (proc)}
                   <span class="pill">
                     {proc}
                     <button

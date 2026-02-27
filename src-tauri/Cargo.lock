@@ -1221,6 +1221,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "glide"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-process",
+ "tauri-plugin-store",
+ "tauri-plugin-updater",
+ "window-vibrancy 0.7.1",
+ "windows",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5201,25 +5220,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
-]
-
-[[package]]
-name = "wkgrip"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-process",
- "tauri-plugin-store",
- "tauri-plugin-updater",
- "window-vibrancy 0.7.1",
- "windows",
 ]
 
 [[package]]

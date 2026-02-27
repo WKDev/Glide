@@ -25,6 +25,12 @@ pub struct AppConfig {
     pub filter_mode: FilterMode,
     pub filter_list: Vec<String>,
     pub autostart: bool,
+    pub allow_nonforeground: bool,
+    pub raise_on_grab: bool,
+    pub snap_enabled: bool,
+    pub snap_threshold: i32,
+    pub scroll_opacity: bool,
+    pub middleclick_topmost: bool,
 }
 
 impl Default for AppConfig {
@@ -37,6 +43,12 @@ impl Default for AppConfig {
             filter_mode: FilterMode::Blacklist,
             filter_list: Vec::new(),
             autostart: false,
+            allow_nonforeground: true,
+            raise_on_grab: false,
+            snap_enabled: true,
+            snap_threshold: 20,
+            scroll_opacity: true,
+            middleclick_topmost: true,
         }
     }
 }

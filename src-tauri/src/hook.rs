@@ -17,6 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::config::{AppConfig, FilterMode, ModifierKey};
+use crate::overlay;
+use crate::snap;
 use crate::window_manager;
 
 const MOD_ALT: u32 = 1;
@@ -25,6 +27,15 @@ const MOD_SHIFT: u32 = 4;
 const MOD_WIN: u32 = 8;
 const MIN_WINDOW_SIZE: i32 = 100;
 const WORKER_QUEUE_SIZE: usize = 1024;
+
+/// Mouse message constants not in the windows crate import set.
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+
+/// Opacity change per scroll tick (out of 255).
+const OPACITY_STEP: i32 = 15;
+/// Minimum opacity — still slightly visible.
+const OPACITY_MIN: u8 = 20;
 
 static MODIFIER_STATE: AtomicU32 = AtomicU32::new(0);
 static HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -36,6 +47,10 @@ static WORKER_TX: OnceLock<SyncSender<WorkerEvent>> = OnceLock::new();
 /// synchronously, without waiting for the worker.
 static MOVE_MASK: AtomicU32 = AtomicU32::new(MOD_ALT);
 static RESIZE_MASK: AtomicU32 = AtomicU32::new(MOD_ALT | MOD_SHIFT);
+
+/// Feature flags — readable from the hook thread without touching the config mutex.
+static SCROLL_OPACITY_ACTIVE: AtomicBool = AtomicBool::new(true);
+static MIDDLECLICK_TOPMOST_ACTIVE: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMode {
@@ -63,12 +78,17 @@ struct GrabState {
     cumulative_dx: i32,
     cumulative_dy: i32,
     resize_dir: ResizeDirection,
+    /// Snap target rect — set when cursor is in a snap zone during Move.
+    /// On grab end, the window snaps to this rect.
+    snap_target: Option<RECT>,
 }
 
 /// Worker event carrying the modifier snapshot from the hook thread.
 #[derive(Clone, Copy)]
 enum WorkerEvent {
     MouseMove { point: POINT, mods: u32 },
+    MouseWheel { point: POINT, delta: i16, mods: u32 },
+    MiddleClick { point: POINT, mods: u32 },
 }
 
 fn current_config() -> Option<AppConfig> {
@@ -144,18 +164,22 @@ fn refresh_modifier_state_from_keyboard() -> u32 {
     mods
 }
 
-/// Sync the pre-computed modifier masks from the current config so the
-/// hook thread can make swallow decisions without touching the config mutex.
-fn update_modifier_masks(config: &AppConfig) {
+/// Sync pre-computed config values so the hook thread can make decisions
+/// without touching the config mutex.
+fn update_hook_state(config: &AppConfig) {
     let move_m = modifier_to_mask(config.move_modifier);
     let resize_m =
         modifier_to_mask(config.resize_modifier_1) | modifier_to_mask(config.resize_modifier_2);
     MOVE_MASK.store(move_m, Ordering::Release);
     RESIZE_MASK.store(resize_m, Ordering::Release);
+    SCROLL_OPACITY_ACTIVE.store(config.scroll_opacity, Ordering::Release);
+    MIDDLECLICK_TOPMOST_ACTIVE.store(config.middleclick_topmost, Ordering::Release);
     log::debug!(
-        "modifier masks updated: move={:#x} resize={:#x}",
+        "hook state updated: move={:#x} resize={:#x} scroll_opacity={} middleclick_topmost={}",
         move_m,
-        resize_m
+        resize_m,
+        config.scroll_opacity,
+        config.middleclick_topmost,
     );
 }
 
@@ -240,6 +264,14 @@ fn try_create_grab_state(
         return None;
     }
 
+    // Foreground-only mode: skip if the target window is not foreground.
+    if !config.allow_nonforeground {
+        let fg = window_manager::get_foreground_window();
+        if fg != Some(hwnd) {
+            return None;
+        }
+    }
+
     let process_name = window_manager::get_process_name(hwnd)?;
     if !process_allowed(config, &process_name) {
         log::debug!("process filtered: {}", process_name);
@@ -251,6 +283,11 @@ fn try_create_grab_state(
         window_manager::restore_window(hwnd);
         // Brief sleep to let DWM finish the restore animation.
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Raise the window to foreground on grab start if configured.
+    if config.raise_on_grab {
+        window_manager::set_foreground(hwnd);
     }
 
     // Always capture the origin rect — used as the authoritative baseline
@@ -271,11 +308,18 @@ fn try_create_grab_state(
         cumulative_dx: 0,
         cumulative_dy: 0,
         resize_dir,
+        snap_target: None,
     })
 }
 
 fn set_active_grab(active: bool) {
     ACTIVE_GRAB.store(active, Ordering::Relaxed);
+}
+
+/// Check if the modifier key(s) for "move" action are currently held.
+fn is_move_modifier_held(mods: u32) -> bool {
+    let move_mask = MOVE_MASK.load(Ordering::Acquire);
+    move_mask != 0 && (mods & move_mask) == move_mask
 }
 
 /// Process a mouse-move event on the worker thread.
@@ -287,28 +331,49 @@ fn set_active_grab(active: bool) {
 /// resetting it between our ticks.
 fn worker_handle_mouse_move(point: POINT, mods: u32, state: &mut Option<GrabState>) {
     if !HOOK_ENABLED.load(Ordering::Relaxed) {
+        if state.is_some() {
+            overlay::hide();
+        }
         *state = None;
         set_active_grab(false);
         return;
     }
 
     let Some(config) = current_config() else {
+        if state.is_some() {
+            overlay::hide();
+        }
         *state = None;
         set_active_grab(false);
         return;
     };
 
     if !config.enabled {
+        if state.is_some() {
+            overlay::hide();
+        }
         *state = None;
         set_active_grab(false);
         return;
     }
 
     let Some(desired_mode) = determine_mode(mods, &config) else {
-        if state.is_some() {
+        // Grab ending — check for snap before clearing state.
+        if let Some(old_grab) = state.take() {
             log::debug!("grab released: mods={:#x}", mods);
+            if let Some(snap_rect) = old_grab.snap_target {
+                // Snap the window to the zone.
+                window_manager::resize_window(
+                    old_grab.hwnd,
+                    snap_rect.left,
+                    snap_rect.top,
+                    snap_rect.right - snap_rect.left,
+                    snap_rect.bottom - snap_rect.top,
+                );
+                log::debug!("snapped to zone");
+            }
+            overlay::hide();
         }
-        *state = None;
         set_active_grab(false);
         return;
     };
@@ -336,6 +401,8 @@ fn worker_handle_mouse_move(point: POINT, mods: u32, state: &mut Option<GrabStat
         }
         grab.mode = desired_mode;
         grab.last_cursor = point;
+        grab.snap_target = None;
+        overlay::hide();
         if matches!(desired_mode, DragMode::Resize) {
             grab.resize_dir = determine_resize_direction(point, grab.origin_rect);
         }
@@ -359,6 +426,21 @@ fn worker_handle_mouse_move(point: POINT, mods: u32, state: &mut Option<GrabStat
                 grab.origin_rect.left + grab.cumulative_dx,
                 grab.origin_rect.top + grab.cumulative_dy,
             );
+
+            // Edge snap detection during move.
+            if config.snap_enabled {
+                if let Some((_zone, zone_rect)) =
+                    snap::detect_snap_zone(point, config.snap_threshold)
+                {
+                    overlay::show(zone_rect);
+                    grab.snap_target = Some(zone_rect);
+                } else {
+                    if grab.snap_target.is_some() {
+                        overlay::hide();
+                    }
+                    grab.snap_target = None;
+                }
+            }
         }
         DragMode::Resize => {
             let mut r = grab.origin_rect;
@@ -395,31 +477,100 @@ fn worker_handle_mouse_move(point: POINT, mods: u32, state: &mut Option<GrabStat
     set_active_grab(true);
 }
 
+/// Handle scroll wheel — modifier + scroll changes window opacity.
+fn worker_handle_scroll(point: POINT, delta: i16, mods: u32) {
+    let Some(config) = current_config() else {
+        return;
+    };
+    if !config.enabled || !config.scroll_opacity {
+        return;
+    }
+
+    // Only act when the move modifier is held.
+    if !is_move_modifier_held(mods) {
+        return;
+    }
+
+    let Some(hwnd) = window_manager::window_from_point(point.x, point.y) else {
+        return;
+    };
+    if !window_manager::is_valid_target(hwnd) {
+        return;
+    }
+
+    let current = window_manager::get_window_opacity(hwnd) as i32;
+    let step = if delta > 0 {
+        OPACITY_STEP
+    } else {
+        -OPACITY_STEP
+    };
+    let new_alpha = (current + step).clamp(OPACITY_MIN as i32, 255) as u8;
+
+    window_manager::set_window_opacity(hwnd, new_alpha);
+    log::debug!("opacity: {} → {} (delta={})", current, new_alpha, delta);
+}
+
+/// Handle middle-click — modifier + middle-click toggles always-on-top.
+fn worker_handle_middleclick(point: POINT, mods: u32) {
+    let Some(config) = current_config() else {
+        return;
+    };
+    if !config.enabled || !config.middleclick_topmost {
+        return;
+    }
+
+    if !is_move_modifier_held(mods) {
+        return;
+    }
+
+    let Some(hwnd) = window_manager::window_from_point(point.x, point.y) else {
+        return;
+    };
+    if !window_manager::is_valid_target(hwnd) {
+        return;
+    }
+
+    let new_state = window_manager::toggle_topmost(hwnd);
+    log::debug!("topmost toggled: {}", new_state);
+}
+
 fn worker_loop(rx: Receiver<WorkerEvent>) {
     let mut state: Option<GrabState> = None;
     while let Ok(event) = rx.recv() {
-        // Drain the channel: if multiple mouse-move events queued up while
-        // we were busy with SetWindowPos, skip to the latest one so the
-        // window tracks the *current* cursor position, not a stale one.
-        let latest = drain_to_latest(event, &rx);
-
-        match latest {
-            WorkerEvent::MouseMove { point, mods } => {
-                worker_handle_mouse_move(point, mods, &mut state);
+        match event {
+            WorkerEvent::MouseMove { .. } => {
+                // Drain to latest mouse-move to skip stale coordinates.
+                let latest = drain_to_latest_mouse_move(event, &rx);
+                if let WorkerEvent::MouseMove { point, mods } = latest {
+                    worker_handle_mouse_move(point, mods, &mut state);
+                }
+            }
+            WorkerEvent::MouseWheel { point, delta, mods } => {
+                worker_handle_scroll(point, delta, mods);
+            }
+            WorkerEvent::MiddleClick { point, mods } => {
+                worker_handle_middleclick(point, mods);
             }
         }
     }
     log::info!("worker loop exited");
 }
 
-/// Consume all immediately-available events from the channel and return
+/// Consume all immediately-available MouseMove events from the channel and return
 /// the last one.  This ensures the worker always acts on the freshest
 /// cursor position rather than processing a backlog of stale coordinates.
+/// Non-MouseMove events are processed inline to avoid dropping them.
 #[inline]
-fn drain_to_latest(first: WorkerEvent, rx: &Receiver<WorkerEvent>) -> WorkerEvent {
+fn drain_to_latest_mouse_move(first: WorkerEvent, rx: &Receiver<WorkerEvent>) -> WorkerEvent {
     let mut latest = first;
     while let Ok(ev) = rx.try_recv() {
-        latest = ev;
+        match ev {
+            WorkerEvent::MouseMove { .. } => {
+                latest = ev;
+            }
+            // Don't skip non-move events — they're important.
+            _ => break,
+        }
     }
     latest
 }
@@ -441,16 +592,6 @@ unsafe extern "system" fn keyboard_hook_proc(
             } else {
                 MODIFIER_STATE.fetch_and(!mask, Ordering::Release);
             }
-            log::debug!(
-                "key vk={:#x} {} → state={:#x}",
-                kb.vkCode,
-                if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                    "DOWN"
-                } else {
-                    "UP"
-                },
-                MODIFIER_STATE.load(Ordering::Relaxed)
-            );
         }
     }
 
@@ -462,6 +603,10 @@ unsafe extern "system" fn keyboard_hook_proc(
 /// AltSnap pattern: **always pass WM_MOUSEMOVE through** (CallNextHookEx).
 /// Swallowing causes OS mouse-tracking and DWM to lose context,
 /// which can trigger snap-back or jitter.
+///
+/// WM_MOUSEWHEEL and WM_MBUTTONDOWN are **swallowed** when modifier is held
+/// and the corresponding feature is enabled — this prevents the underlying
+/// app from also receiving the event.
 unsafe extern "system" fn mouse_hook_proc(
     n_code: i32,
     w_param: WPARAM,
@@ -470,26 +615,70 @@ unsafe extern "system" fn mouse_hook_proc(
     if n_code < 0 {
         return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
     }
-    if w_param.0 as u32 != WM_MOUSEMOVE {
-        return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
-    }
     if !HOOK_ENABLED.load(Ordering::Relaxed) {
         set_active_grab(false);
         return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
     }
-    let mouse = &*(l_param.0 as *const MSLLHOOKSTRUCT);
-    let mods = MODIFIER_STATE.load(Ordering::Acquire);
-    if let Some(tx) = WORKER_TX.get() {
-        let _ = tx.try_send(WorkerEvent::MouseMove {
-            point: mouse.pt,
-            mods,
-        });
-    }
 
-    // Always pass through — never swallow WM_MOUSEMOVE.
-    // AltSnap does the same: the hook dispatches work to a worker thread
-    // but lets the mouse event propagate normally through the OS.
-    unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+    let msg = w_param.0 as u32;
+
+    match msg {
+        WM_MOUSEMOVE => {
+            let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+            let mods = MODIFIER_STATE.load(Ordering::Acquire);
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.try_send(WorkerEvent::MouseMove {
+                    point: mouse.pt,
+                    mods,
+                });
+            }
+            // Always pass through — never swallow WM_MOUSEMOVE.
+            unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+        }
+
+        WM_MOUSEWHEEL => {
+            let mods = MODIFIER_STATE.load(Ordering::Acquire);
+            let move_mask = MOVE_MASK.load(Ordering::Acquire);
+            let feature_active = SCROLL_OPACITY_ACTIVE.load(Ordering::Relaxed);
+
+            if feature_active && move_mask != 0 && (mods & move_mask) == move_mask {
+                // Modifier held + feature on → swallow and send to worker.
+                let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+                let delta = (mouse.mouseData >> 16) as i16;
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.try_send(WorkerEvent::MouseWheel {
+                        point: mouse.pt,
+                        delta,
+                        mods,
+                    });
+                }
+                LRESULT(1) // Swallow
+            } else {
+                unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+            }
+        }
+
+        WM_MBUTTONDOWN => {
+            let mods = MODIFIER_STATE.load(Ordering::Acquire);
+            let move_mask = MOVE_MASK.load(Ordering::Acquire);
+            let feature_active = MIDDLECLICK_TOPMOST_ACTIVE.load(Ordering::Relaxed);
+
+            if feature_active && move_mask != 0 && (mods & move_mask) == move_mask {
+                let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.try_send(WorkerEvent::MiddleClick {
+                        point: mouse.pt,
+                        mods,
+                    });
+                }
+                LRESULT(1) // Swallow
+            } else {
+                unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+            }
+        }
+
+        _ => unsafe { CallNextHookEx(None, n_code, w_param, l_param) },
+    }
 }
 
 fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
@@ -502,12 +691,15 @@ fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
         let _ = SHARED_CONFIG.set(config.clone());
     }
 
-    // Sync modifier masks from config so the hook thread can swallow correctly.
-    update_modifier_masks(&config.lock());
+    // Sync hook state from config.
+    update_hook_state(&config.lock());
 
     // Sync modifier state from physical keyboard before hooks are active
     let initial = refresh_modifier_state_from_keyboard();
     log::debug!("initial modifier state: {:#x}", initial);
+
+    // Create the snap overlay window on this thread (needs the message loop).
+    overlay::create();
 
     let (worker_tx, worker_rx) = mpsc::sync_channel::<WorkerEvent>(WORKER_QUEUE_SIZE);
     let _ = WORKER_TX.set(worker_tx);
@@ -534,6 +726,7 @@ fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
             if let Ok(hook) = mh {
                 let _ = unsafe { UnhookWindowsHookEx(hook) };
             }
+            overlay::destroy();
             return;
         }
     };
@@ -554,6 +747,7 @@ fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
     log::info!("hook thread shutting down");
     let _ = unsafe { UnhookWindowsHookEx(keyboard_hook) };
     let _ = unsafe { UnhookWindowsHookEx(mouse_hook) };
+    overlay::destroy();
 }
 
 pub fn start_hook_thread(config: Arc<Mutex<AppConfig>>) -> u32 {
@@ -566,8 +760,8 @@ pub fn start_hook_thread(config: Arc<Mutex<AppConfig>>) -> u32 {
         let _ = SHARED_CONFIG.set(config.clone());
     }
 
-    // Pre-compute masks so the hook thread has them even before hook_thread_main runs.
-    update_modifier_masks(&config.lock());
+    // Pre-compute state so the hook thread has them even before hook_thread_main runs.
+    update_hook_state(&config.lock());
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -601,8 +795,8 @@ pub fn set_enabled(enabled: bool) {
 pub fn update_config(config: Arc<Mutex<AppConfig>>) {
     let cfg = config.lock().clone();
 
-    // Update modifier masks so the hook thread picks up new keybindings.
-    update_modifier_masks(&cfg);
+    // Update hook state so the hook thread picks up new keybindings and feature flags.
+    update_hook_state(&cfg);
 
     if let Some(shared) = SHARED_CONFIG.get() {
         if !Arc::ptr_eq(shared, &config) {

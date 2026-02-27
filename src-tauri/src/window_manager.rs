@@ -3,28 +3,34 @@ use std::mem;
 use std::path::Path;
 
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{CloseHandle, COLORREF, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetAncestor, GetClassNameW, GetDesktopWindow, GetWindowLongW, GetWindowPlacement,
-    GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed,
-    SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT, GWL_STYLE, SET_WINDOW_POS_FLAGS,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT, WS_CHILD,
+    EnumWindows, GetAncestor, GetClassNameW, GetDesktopWindow, GetForegroundWindow,
+    GetLayeredWindowAttributes, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT,
+    GWL_EXSTYLE, GWL_STYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, SET_WINDOW_POS_FLAGS,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT, WS_CHILD, WS_EX_LAYERED,
+    WS_EX_TOPMOST,
 };
 
 /// Flags not exported by the `windows` crate v0.61 — raw Win32 values.
 const SWP_NOSIZE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(0x0001);
+const SWP_NOMOVE: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(0x0002);
 const SWP_NOOWNERZORDER: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(0x0200);
 
 /// AltSnap MOVETHICKBORDERS: synchronous move, no size change.
 /// Most Win10/11 windows have thick (invisible) DWM borders, so AltSnap
 /// uses synchronous positioning for them rather than ASYNCWINDOWPOS.
-const MOVE_FLAGS: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(
-    SWP_NOZORDER.0 | SWP_NOOWNERZORDER.0 | SWP_NOACTIVATE.0 | SWP_NOSIZE.0,
-);
+const MOVE_FLAGS: SET_WINDOW_POS_FLAGS =
+    SET_WINDOW_POS_FLAGS(SWP_NOZORDER.0 | SWP_NOOWNERZORDER.0 | SWP_NOACTIVATE.0 | SWP_NOSIZE.0);
 
 /// AltSnap RESIZEFLAG: synchronous, size may change.
 const RESIZE_FLAGS: SET_WINDOW_POS_FLAGS =
@@ -193,6 +199,121 @@ pub fn restore_window(hwnd: HWND) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_RESTORE);
     }
+}
+
+pub fn get_foreground_window() -> Option<HWND> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        None
+    } else {
+        Some(hwnd)
+    }
+}
+
+pub fn set_foreground(hwnd: HWND) {
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Monitor info
+// ---------------------------------------------------------------------------
+
+/// Get the working area (excludes taskbar) of the monitor containing the given point.
+pub fn get_monitor_work_area(point: POINT) -> Option<RECT> {
+    unsafe {
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut info: MONITORINFO = mem::zeroed();
+        info.cbSize = mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        Some(info.rcWork)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Opacity (SetLayeredWindowAttributes)
+// ---------------------------------------------------------------------------
+
+/// Get current window opacity (0–255). Returns 255 if window is not layered.
+pub fn get_window_opacity(hwnd: HWND) -> u8 {
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+    if (ex_style & WS_EX_LAYERED.0) == 0 {
+        return 255;
+    }
+    let mut alpha: u8 = 255;
+    let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
+    let result =
+        unsafe { GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)) };
+    if result.is_ok() && (flags.0 & LWA_ALPHA.0) != 0 {
+        alpha
+    } else {
+        255
+    }
+}
+
+/// Set window opacity. 255 = fully opaque (removes WS_EX_LAYERED), <255 = translucent.
+pub fn set_window_opacity(hwnd: HWND, alpha: u8) {
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+
+    if alpha >= 255 {
+        // Remove WS_EX_LAYERED to restore normal rendering
+        if (ex_style & WS_EX_LAYERED.0) != 0 {
+            unsafe {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, (ex_style & !WS_EX_LAYERED.0) as i32);
+            }
+        }
+        return;
+    }
+
+    // Add WS_EX_LAYERED if not present
+    if (ex_style & WS_EX_LAYERED.0) == 0 {
+        unsafe {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (ex_style | WS_EX_LAYERED.0) as i32);
+        }
+    }
+
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Always-on-top
+// ---------------------------------------------------------------------------
+
+pub fn is_topmost(hwnd: HWND) -> bool {
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+    (ex_style & WS_EX_TOPMOST.0) != 0
+}
+
+/// Toggle always-on-top state. Returns the new state (true = topmost).
+pub fn toggle_topmost(hwnd: HWND) -> bool {
+    let was_topmost = is_topmost(hwnd);
+    let insert_after = if was_topmost {
+        HWND(-2isize as *mut std::ffi::c_void) // HWND_NOTOPMOST
+    } else {
+        HWND(-1isize as *mut std::ffi::c_void) // HWND_TOPMOST
+    };
+
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(insert_after),
+            0,
+            0,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0),
+        );
+    }
+
+    !was_topmost
 }
 
 // ---------------------------------------------------------------------------
