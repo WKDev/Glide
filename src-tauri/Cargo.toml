@@ -1,12 +1,12 @@
 [package]
-name = "wkgrip"
+name = "glide"
 version = "0.1.0"
 description = "Modifier key + mouse window move/resize utility"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "wkgrip_lib"
+name = "glide_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

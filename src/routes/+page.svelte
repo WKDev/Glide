@@ -166,7 +166,7 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="side-brand">
-        <span class="side-brand-name">wkgrip</span>
+        <span class="side-brand-name">Glide</span>
         <span class="side-brand-ver">v0.1.0</span>
       </div>
       <nav class="side-nav" aria-label="Settings sections">
@@ -444,7 +444,7 @@
         <section id="about" class="group">
           <h1 class="group-title">About</h1>
           <div class="panel">
-            <h2 class="panel-title">wkgrip</h2>
+            <h2 class="panel-title">Glide</h2>
             <section class="card about-card">
               <p>Keyboard-assisted window move/resize utility.</p>
               <p>Version: <strong>v0.1.0</strong></p>

@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-The following versions of wkgrip are currently supported with security updates:
+The following versions of Glide are currently supported with security updates:
 
 | Version | Status       |
 | ------- | ------------ |
@@ -10,11 +10,11 @@ The following versions of wkgrip are currently supported with security updates:
 
 ## Reporting a Vulnerability
 
-We take security seriously. If you discover a vulnerability in wkgrip, please report it responsibly using GitHub Security Advisories.
+We take security seriously. If you discover a vulnerability in Glide, please report it responsibly using GitHub Security Advisories.
 
 ### How to Report
 
-1. Go to the [Security Advisories](https://github.com/yourusername/wkgrip/security/advisories) page on GitHub
+1. Go to the [Security Advisories](https://github.com/wkdev/glide/security/advisories) page on GitHub
 2. Click "Report a vulnerability"
 3. Provide a detailed description of the vulnerability, including:
    - Steps to reproduce
@@ -37,7 +37,7 @@ The application currently has Content Security Policy (CSP) disabled (`"csp": nu
 
 **Why this is acceptable:**
 
-- wkgrip only loads local assets from the application bundle
+- Glide only loads local assets from the application bundle
 - No remote content is loaded or executed
 - The application does not fetch resources from external URLs
 - All functionality is self-contained within the Tauri application
@@ -49,13 +49,13 @@ The application currently has Content Security Policy (CSP) disabled (`"csp": nu
 
 ## Security Best Practices
 
-When using wkgrip:
+When using Glide:
 
 - Keep your Windows system and all software up to date
-- Only download wkgrip from the official [GitHub Releases](https://github.com/yourusername/wkgrip/releases) page
+- Only download Glide from the official [GitHub Releases](https://github.com/wkdev/glide/releases) page
 - Verify installer signatures when available
 - Report any suspicious behavior to the security team
 
 ## License
 
-wkgrip is released under the MIT License. See the LICENSE file for details.
+Glide is released under the MIT License. See the LICENSE file for details.

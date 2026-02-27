@@ -1,4 +1,4 @@
-# wkgrip
+# Glide
 
 A modifier key + mouse window move/resize utility for Windows. Hold a modifier key and use your mouse to move or resize any window without clicking the title bar.
 
@@ -8,7 +8,7 @@ A modifier key + mouse window move/resize utility for Windows. Hold a modifier k
 - **Window Resizing**: Hold Alt+Shift + right-click and drag to resize any window
 - **Configurable Modifiers**: Customize which modifier keys trigger move and resize actions (Alt, Ctrl, Shift, Win)
 - **Process Filtering**: Whitelist or blacklist specific applications from using the utility
-- **Auto-start**: Optionally launch wkgrip automatically on Windows startup
+- **Auto-start**: Optionally launch Glide automatically on Windows startup
 - **Window Snapping**: Snap windows to grid positions with configurable threshold
 - **Scroll Opacity**: Adjust window opacity while scrolling with modifier key held
 - **Middle-click Topmost**: Bring window to top with middle-click while holding modifier
@@ -17,7 +17,7 @@ A modifier key + mouse window move/resize utility for Windows. Hold a modifier k
 
 ## Installation
 
-Download the latest installer from the [GitHub Releases](https://github.com/yourusername/wkgrip/releases) page:
+Download the latest installer from the [GitHub Releases](https://github.com/wkdev/glide/releases) page:
 
 - **NSIS Installer** (.exe) — Recommended for most users
 - **MSI Installer** (.msi) — Alternative Windows installer format
@@ -35,7 +35,7 @@ Run the installer and follow the on-screen prompts. The application will be adde
 
 ### Configuration
 
-Access settings by clicking the wkgrip icon in your system tray. The following options are available:
+Access settings by clicking the Glide icon in your system tray. The following options are available:
 
 | Option                | Description                                  | Default   |
 | --------------------- | -------------------------------------------- | --------- |
@@ -64,8 +64,8 @@ Settings are automatically saved with a 220ms debounce.
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/yourusername/wkgrip.git
-   cd wkgrip
+   git clone https://github.com/wkdev/glide.git
+   cd glide
    ```
 
 2. Install dependencies:
@@ -105,8 +105,8 @@ pnpm tauri build
 
 This generates:
 
-- **NSIS Installer** — `src-tauri/target/release/bundle/nsis/wkgrip_0.1.0_x64-setup.exe`
-- **MSI Installer** — `src-tauri/target/release/bundle/msi/wkgrip_0.1.0_x64.msi`
+- **NSIS Installer** — `src-tauri/target/release/bundle/nsis/glide_0.1.0_x64-setup.exe`
+- **MSI Installer** — `src-tauri/target/release/bundle/msi/glide_0.1.0_x64.msi`
 
 Both installers include the complete application and can be distributed to end users.
 

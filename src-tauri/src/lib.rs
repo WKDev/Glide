@@ -22,7 +22,7 @@ use window_vibrancy::apply_mica;
 
 pub fn run() {
     env_logger::init();
-    log::info!("wkgrip starting");
+    log::info!("Glide starting");
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
@@ -106,7 +106,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
-        .tooltip("wkgrip")
+        .tooltip("Glide")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "settings" => {
