@@ -4,7 +4,6 @@ use std::path::Path;
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, COLORREF, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
@@ -17,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT,
     GWL_EXSTYLE, GWL_STYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, SET_WINDOW_POS_FLAGS,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, WINDOWPLACEMENT, WS_CHILD, WS_EX_LAYERED,
-    WS_EX_TOPMOST,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, WINDOWPLACEMENT, WS_CHILD,
+    WS_EX_LAYERED, WS_EX_TOPMOST,
 };
 
 /// Flags not exported by the `windows` crate v0.61 — raw Win32 values.
@@ -128,42 +127,6 @@ pub fn get_window_rect(hwnd: HWND) -> Option<RECT> {
     }
 }
 
-/// Returns the DWM extended-frame rect (visible content area, no invisible borders).
-/// Falls back to `GetWindowRect` if DWM attribute is unavailable.
-pub fn get_dwm_frame_rect(hwnd: HWND) -> Option<RECT> {
-    let mut rect = RECT::default();
-    let hr = unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut rect as *mut RECT as *mut _,
-            mem::size_of::<RECT>() as u32,
-        )
-    };
-    if hr.is_ok() {
-        Some(rect)
-    } else {
-        get_window_rect(hwnd)
-    }
-}
-
-/// Compute the invisible-border offsets: (left, top, right, bottom).
-/// For a typical Win10/11 window: left ~= 7, top ~= 0, right ~= 7, bottom ~= 7.
-pub fn get_border_offsets(hwnd: HWND) -> (i32, i32, i32, i32) {
-    let Some(outer) = get_window_rect(hwnd) else {
-        return (0, 0, 0, 0);
-    };
-    let Some(inner) = get_dwm_frame_rect(hwnd) else {
-        return (0, 0, 0, 0);
-    };
-    (
-        inner.left - outer.left,
-        inner.top - outer.top,
-        outer.right - inner.right,
-        inner.bottom - outer.bottom,
-    )
-}
-
 pub fn is_maximized(hwnd: HWND) -> bool {
     unsafe { IsZoomed(hwnd).as_bool() }
 }
@@ -210,10 +173,10 @@ pub fn get_foreground_window() -> Option<HWND> {
     }
 }
 
-pub fn set_foreground(hwnd: HWND) {
-    unsafe {
-        let _ = SetForegroundWindow(hwnd);
-    }
+/// Attempts to bring `hwnd` to the foreground. Returns `true` if the OS accepted
+/// the request, `false` if it was silently denied (Windows foreground-lock policy).
+pub fn set_foreground(hwnd: HWND) -> bool {
+    unsafe { SetForegroundWindow(hwnd).as_bool() }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +224,7 @@ pub fn get_window_opacity(hwnd: HWND) -> u8 {
 pub fn set_window_opacity(hwnd: HWND, alpha: u8) {
     let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
 
-    if alpha >= 255 {
+    if alpha == 255 {
         // Remove WS_EX_LAYERED to restore normal rendering
         if (ex_style & WS_EX_LAYERED.0) != 0 {
             unsafe {
@@ -316,6 +279,23 @@ pub fn toggle_topmost(hwnd: HWND) -> bool {
     !was_topmost
 }
 
+/// Raise window to the top of the non-topmost Z-order (HWND_TOP).
+/// Unlike SetForegroundWindow, this does NOT activate the window or set WS_EX_TOPMOST.
+pub fn raise_to_top(hwnd: HWND) {
+    let hwnd_top = HWND(0isize as *mut std::ffi::c_void); // HWND_TOP
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(hwnd_top),
+            0,
+            0,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Window positioning — matches AltSnap flag patterns
 // ---------------------------------------------------------------------------
@@ -339,24 +319,6 @@ pub fn resize_window(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
     unsafe {
         let _ = SetWindowPos(hwnd, None, x, y, w, h, RESIZE_FLAGS);
     }
-}
-
-/// Legacy combined call — kept for any call site that doesn't distinguish
-/// move vs resize.  Prefers async move when size is unchanged.
-pub fn set_window_rect(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    // When only position changes, use async move path.
-    if let Some(cur) = get_window_rect(hwnd) {
-        let cur_w = cur.right - cur.left;
-        let cur_h = cur.bottom - cur.top;
-        if cur_w == w && cur_h == h {
-            move_window(hwnd, x, y);
-            return;
-        }
-    }
-    resize_window(hwnd, x, y, w, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,4 +379,54 @@ pub fn get_running_process_names() -> Vec<String> {
     let mut result: Vec<String> = names.into_iter().collect();
     result.sort_unstable_by_key(|s| s.to_ascii_lowercase());
     result
+}
+
+/// Maximize the window via the OS-native `SW_MAXIMIZE` command.
+/// This puts the window into the DWM-tracked maximised state (Snap Assist,
+/// taskbar peek, and restore-on-drag all work correctly).
+pub fn maximize_window(hwnd: HWND) {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_system_class_name_shell_traywnd() {
+        assert!(is_system_class_name("shell_traywnd"));
+    }
+
+    #[test]
+    fn test_is_system_class_name_progman() {
+        assert!(is_system_class_name("progman"));
+    }
+
+    #[test]
+    fn test_is_system_class_name_workerw() {
+        assert!(is_system_class_name("workerw"));
+    }
+
+    #[test]
+    fn test_is_system_class_name_shell_secondarytraywnd() {
+        assert!(is_system_class_name("shell_secondarytraywnd"));
+    }
+
+    #[test]
+    fn test_is_system_class_name_case_insensitive() {
+        assert!(is_system_class_name("Shell_TrayWnd"));
+        assert!(is_system_class_name("PROGMAN"));
+        assert!(is_system_class_name("WorkerW"));
+    }
+
+    #[test]
+    fn test_is_system_class_name_non_system() {
+        assert!(!is_system_class_name("notepad"));
+        assert!(!is_system_class_name("chrome_widgetwin_1"));
+        assert!(!is_system_class_name(""));
+        assert!(!is_system_class_name("shell_tray"));
+        assert!(!is_system_class_name("shell_traywnd_extra"));
+    }
 }
