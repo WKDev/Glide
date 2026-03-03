@@ -151,6 +151,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: rustsec/audit-check@v1.3.2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Security audit (Cargo)
+        run: cargo install cargo-audit --locked && cargo audit
+        working-directory: src-tauri
