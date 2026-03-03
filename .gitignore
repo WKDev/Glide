@@ -12,6 +12,8 @@ vite.config.ts.timestamp-*
 
 # Tauri build artifacts
 src-tauri/target/
+.tauri/
+src-tauri/target/
 
 # Windows special files
 nul
