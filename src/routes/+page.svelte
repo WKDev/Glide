@@ -5,11 +5,11 @@
   import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
   import type { AppConfig } from '$lib/config';
   import { MODIFIER_OPTIONS, DEFAULT_CONFIG } from '$lib/config';
-  import { saveConfig } from '$lib/store';
   import { check } from '@tauri-apps/plugin-updater';
+  import { getVersion } from '@tauri-apps/api/app';
   import { relaunch } from '@tauri-apps/plugin-process';
 
-  let hasChecked = false;
+  let appVersion = $state('');
 
   let config = $state<AppConfig>({ ...DEFAULT_CONFIG });
   let runningProcesses = $state<string[]>([]);
@@ -18,41 +18,49 @@
   let loaded = $state(false);
   let updateAvailable = $state<{ version: string } | null>(null);
   let isUpdating = $state(false);
+  let autostartError = $state<string | null>(null);
+  let updateError = $state<string | null>(null);
+  let updateCheckFailed = $state(false);
   let activeSection = $state<'general' | 'process-filter' | 'about'>('general');
   let lastSavedSnapshot = $state('');
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(async () => {
+    // Fire update check concurrently so it does not block UI initialisation.
+    const updateCheckPromise = check()
+      .then((update) => {
+        if (update) updateAvailable = { version: update.version };
+      })
+      .catch((e) => {
+        console.error('Update check failed:', e);
+        updateCheckFailed = true;
+      });
+
     try {
       const loaded_cfg = await invoke<AppConfig>('get_config');
       config = loaded_cfg;
-    } catch {
+    } catch (e) {
+      console.error('Failed to load config from backend:', e);
       config = { ...DEFAULT_CONFIG };
     }
     try {
       autostartEnabled = await isEnabled();
       config.autostart = autostartEnabled;
-    } catch {
+    } catch (e) {
+      console.error('Failed to read autostart state:', e);
       autostartEnabled = false;
     }
     await loadRunning();
-    config.enabled = true;
+    appVersion = await getVersion().catch(() => '');
     try {
-      await invoke('set_hook_enabled', { enabled: true });
-    } catch {}
-    lastSavedSnapshot = '';
-    loaded = true;
-  });
-
-  onMount(async () => {
-    if (hasChecked) return;
-    hasChecked = true;
-    try {
-      const update = await check();
-      if (update) updateAvailable = { version: update.version };
+      await invoke('set_hook_enabled', { enabled: config.enabled });
     } catch (e) {
-      console.error('Update check failed:', e);
+      console.error('Failed to sync hook enabled state:', e);
     }
+    lastSavedSnapshot = JSON.stringify(config);
+    loaded = true;
+
+    void updateCheckPromise;
   });
 
   const moveLabel = $derived(
@@ -66,6 +74,10 @@
   const resizeLabel2 = $derived(
     MODIFIER_OPTIONS.find((o) => o.value === config.resize_modifier_2)?.label ??
       config.resize_modifier_2
+  );
+  const scrollOpacityLabel = $derived(
+    MODIFIER_OPTIONS.find((o) => o.value === config.scroll_opacity_modifier)
+      ?.label ?? config.scroll_opacity_modifier
   );
   const filterHint = $derived(
     config.filter_mode === 'whitelist'
@@ -97,7 +109,8 @@
   async function loadRunning() {
     try {
       runningProcesses = await invoke<string[]>('get_running_processes');
-    } catch {
+    } catch (e) {
+      console.error('Failed to load running processes:', e);
       runningProcesses = [];
     }
   }
@@ -105,13 +118,20 @@
   async function toggleAutostart(next: boolean) {
     autostartEnabled = next;
     config.autostart = next;
+    autostartError = null;
     try {
       if (next) {
         await enable();
       } else {
         await disable();
       }
-    } catch {}
+    } catch {
+      autostartError = next
+        ? 'Failed to enable autostart'
+        : 'Failed to disable autostart';
+      autostartEnabled = !next;
+      config.autostart = !next;
+    }
   }
 
   function removeProcess(name: string) {
@@ -121,6 +141,7 @@
   async function installUpdate() {
     if (isUpdating) return;
     isUpdating = true;
+    updateError = null;
     try {
       const update = await check();
       if (update) {
@@ -129,6 +150,7 @@
       }
     } catch (e) {
       console.error('Update install failed:', e);
+      updateError = 'Update failed. Please try again.';
       isUpdating = false;
     }
   }
@@ -146,10 +168,9 @@
     saveTimer = setTimeout(async () => {
       try {
         await invoke('set_config', { config });
-        await saveConfig(config);
         lastSavedSnapshot = JSON.stringify(config);
-      } catch {
-        // Ignore autosave errors to keep interactions uninterrupted.
+      } catch (e) {
+        console.error('Autosave failed:', e);
       }
     }, 220);
 
@@ -167,7 +188,7 @@
     <aside class="sidebar">
       <div class="side-brand">
         <span class="side-brand-name">Glide</span>
-        <span class="side-brand-ver">v0.1.0</span>
+        <span class="side-brand-ver">{appVersion ? `v${appVersion}` : ''}</span>
       </div>
       <nav class="side-nav" aria-label="Settings sections">
         <button
@@ -317,6 +338,17 @@
                   <Switch.Thumb class="thumb" />
                 </Switch.Root>
               </div>
+              <div class="row-item" class:row-disabled={!config.snap_enabled}>
+                <span class="row-label">Use Windows 11 snap groups</span>
+                <Switch.Root
+                  class="toggle"
+                  bind:checked={config.snap_native}
+                  disabled={!config.snap_enabled}
+                  aria-label="Toggle Windows 11 snap groups"
+                >
+                  <Switch.Thumb class="thumb" />
+                </Switch.Root>
+              </div>
               <div class="row-item">
                 <span class="row-label">Scroll to change opacity</span>
                 <Switch.Root
@@ -326,6 +358,30 @@
                 >
                   <Switch.Thumb class="thumb" />
                 </Switch.Root>
+              </div>
+              <div class="row-item" class:row-disabled={!config.scroll_opacity}>
+                <span class="row-label">Scroll opacity modifier</span>
+                <Select.Root
+                  type="single"
+                  bind:value={config.scroll_opacity_modifier}
+                >
+                  <Select.Trigger
+                    class="select-trigger"
+                    aria-label="Scroll opacity modifier"
+                  >
+                    <span class="select-value">{scrollOpacityLabel}</span>
+                    <span class="select-caret">▾</span>
+                  </Select.Trigger>
+                  <Select.Content class="select-content" sideOffset={4}>
+                    {#each MODIFIER_OPTIONS as opt (opt.value)}
+                      <Select.Item
+                        class="select-item"
+                        value={opt.value}
+                        label={opt.label}>{opt.label}</Select.Item
+                      >
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
               </div>
               <div class="row-item">
                 <span class="row-label">Middle-click always-on-top</span>
@@ -337,12 +393,26 @@
                   <Switch.Thumb class="thumb" />
                 </Switch.Root>
               </div>
+              <div class="row-item">
+                <span class="row-label">Drag threshold</span>
+                <div class="slider-group">
+                  <input
+                    type="range"
+                    class="slider"
+                    min="0"
+                    max="200"
+                    bind:value={config.drag_threshold}
+                    aria-label="Drag threshold in pixels"
+                  />
+                  <span class="slider-value">{config.drag_threshold}px</span>
+                </div>
+              </div>
             </section>
           </div>
 
           <div class="panel">
             <h2 class="panel-title">Autostart</h2>
-            <section class="card card-row">
+            <section class="card">
               <div class="row-item">
                 <span class="row-label">Start with Windows</span>
                 <Switch.Root
@@ -354,6 +424,9 @@
                   <Switch.Thumb class="thumb" />
                 </Switch.Root>
               </div>
+              {#if autostartError}
+                <p class="error-text">{autostartError}</p>
+              {/if}
             </section>
           </div>
         </section>
@@ -447,25 +520,37 @@
             <h2 class="panel-title">Glide</h2>
             <section class="card about-card">
               <p>Keyboard-assisted window move/resize utility.</p>
-              <p>Version: <strong>v0.1.0</strong></p>
+              <p>
+                Version: <strong>{appVersion ? `v${appVersion}` : ''}</strong>
+              </p>
               <p>
                 Persistence: settings auto-save to Tauri runtime config and
                 local store.
               </p>
             </section>
+            {#if updateCheckFailed && updateAvailable === null}
+              <section class="card update-card">
+                <p class="error-text">
+                  Could not check for updates. Check your connection.
+                </p>
+              </section>
+            {/if}
             {#if updateAvailable !== null}
               <section class="card update-card">
                 <p>
-                  새 버전 <strong>{updateAvailable.version}</strong> 사용 가능
+                  New version <strong>{updateAvailable.version}</strong> available
                 </p>
                 <button
                   class="update-btn"
                   onclick={installUpdate}
                   disabled={isUpdating}
                 >
-                  {isUpdating ? '설치 중...' : '업데이트'}
+                  {isUpdating ? 'Installing...' : 'Update'}
                 </button>
               </section>
+              {#if updateError}
+                <p class="error-text" style="margin-top: 6px;">{updateError}</p>
+              {/if}
             {/if}
           </div>
         </section>
@@ -551,7 +636,7 @@
 
   main.loaded {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 
   .app-shell {
@@ -700,7 +785,7 @@
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 11px;
-    backdrop-filter: blur(10px) saturate(115%);
+    backdrop-filter: none;
     box-shadow:
       inset 0 1px 0 rgb(255 255 255 / 0.62),
       0 7px 22px rgb(31 60 100 / 0.08);
@@ -730,14 +815,6 @@
     opacity: 0.55;
     cursor: not-allowed;
   }
-
-  .card-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
   .mod-row {
     display: flex;
     align-items: center;
@@ -799,10 +876,63 @@
     margin-top: 7px;
   }
 
+  .row-disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
   .row-label {
     color: var(--text);
     font-size: 13px;
     line-height: 1.3;
+  }
+
+  .slider-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 90px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--toggle-off);
+    cursor: pointer;
+    outline: none;
+    flex-shrink: 0;
+  }
+
+  .slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+    transition: transform 0.1s ease;
+  }
+
+  .slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+  }
+
+  .slider:focus-visible {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 25%, transparent);
+  }
+
+  .slider-value {
+    width: 36px;
+    text-align: right;
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
   }
 
   :global(.toggle) {
@@ -1113,6 +1243,13 @@
       opacity: 1;
       transform: translateY(0) scale(1);
     }
+  }
+
+  .error-text {
+    color: #c94444;
+    font-size: 11px;
+    margin-top: 6px;
+    line-height: 1.4;
   }
 
   @media (prefers-color-scheme: dark) {
