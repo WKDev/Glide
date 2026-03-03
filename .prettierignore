@@ -2,3 +2,5 @@ build/
 node_modules/
 src-tauri/target/
 .sisyphus/
+pnpm-lock.yaml
+src-tauri/gen/

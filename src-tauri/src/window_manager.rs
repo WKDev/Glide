@@ -282,7 +282,7 @@ pub fn toggle_topmost(hwnd: HWND) -> bool {
 /// Raise window to the top of the non-topmost Z-order (HWND_TOP).
 /// Unlike SetForegroundWindow, this does NOT activate the window or set WS_EX_TOPMOST.
 pub fn raise_to_top(hwnd: HWND) {
-    let hwnd_top = HWND(0isize as *mut std::ffi::c_void); // HWND_TOP
+    let hwnd_top = HWND(std::ptr::null_mut::<std::ffi::c_void>()); // HWND_TOP
     unsafe {
         let _ = SetWindowPos(
             hwnd,
