@@ -104,3 +104,144 @@ fn snap_zone_rect(zone: SnapZone, work: RECT) -> RECT {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::RECT;
+
+    #[test]
+    fn test_snap_zone_left() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::Left, work);
+        assert_eq!(result.left, 0);
+        assert_eq!(result.top, 0);
+        assert_eq!(result.right, 960);
+        assert_eq!(result.bottom, 1080);
+    }
+
+    #[test]
+    fn test_snap_zone_right() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::Right, work);
+        assert_eq!(result.left, 960);
+        assert_eq!(result.top, 0);
+        assert_eq!(result.right, 1920);
+        assert_eq!(result.bottom, 1080);
+    }
+
+    #[test]
+    fn test_snap_zone_maximize() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::Maximize, work);
+        assert_eq!(result.left, 0);
+        assert_eq!(result.top, 0);
+        assert_eq!(result.right, 1920);
+        assert_eq!(result.bottom, 1080);
+    }
+
+    #[test]
+    fn test_snap_zone_top_left() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::TopLeft, work);
+        assert_eq!(result.left, 0);
+        assert_eq!(result.top, 0);
+        assert_eq!(result.right, 960);
+        assert_eq!(result.bottom, 540);
+    }
+
+    #[test]
+    fn test_snap_zone_top_right() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::TopRight, work);
+        assert_eq!(result.left, 960);
+        assert_eq!(result.top, 0);
+        assert_eq!(result.right, 1920);
+        assert_eq!(result.bottom, 540);
+    }
+
+    #[test]
+    fn test_snap_zone_bottom_left() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::BottomLeft, work);
+        assert_eq!(result.left, 0);
+        assert_eq!(result.top, 540);
+        assert_eq!(result.right, 960);
+        assert_eq!(result.bottom, 1080);
+    }
+
+    #[test]
+    fn test_snap_zone_bottom_right() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let result = snap_zone_rect(SnapZone::BottomRight, work);
+        assert_eq!(result.left, 960);
+        assert_eq!(result.top, 540);
+        assert_eq!(result.right, 1920);
+        assert_eq!(result.bottom, 1080);
+    }
+
+    #[test]
+    fn test_snap_zone_odd_dimensions() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1921,
+            bottom: 1081,
+        };
+        let result = snap_zone_rect(SnapZone::TopLeft, work);
+        assert_eq!(result.left, 0);
+        assert_eq!(result.top, 0);
+        assert_eq!(result.right, 960);
+        assert_eq!(result.bottom, 540);
+    }
+
+    #[test]
+    fn test_snap_zone_non_zero_origin() {
+        let work = RECT {
+            left: 100,
+            top: 50,
+            right: 2020,
+            bottom: 1130,
+        };
+        let result = snap_zone_rect(SnapZone::Right, work);
+        assert_eq!(result.left, 1060);
+        assert_eq!(result.top, 50);
+        assert_eq!(result.right, 2020);
+        assert_eq!(result.bottom, 1130);
+    }
+}

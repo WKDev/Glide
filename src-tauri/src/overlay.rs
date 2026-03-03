@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
-use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
@@ -26,14 +26,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// that can be used from any thread.
 #[derive(Clone, Copy)]
 struct SendHwnd(HWND);
+// SAFETY: Win32 window handles (HWND) are process-wide identifiers that uniquely
+// identify a window and are valid for cross-thread use via the Win32 API (e.g.,
+// SetWindowPos, ShowWindow, DestroyWindow are all thread-safe for foreign HWNDs).
 unsafe impl Send for SendHwnd {}
 unsafe impl Sync for SendHwnd {}
 
 static OVERLAY_HWND: OnceLock<SendHwnd> = OnceLock::new();
 static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+/// Raw handle of the GDI background brush, stored for cleanup on destroy.
+static OVERLAY_BRUSH: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// Semi-transparent blue fill (Tailwind blue-400 in BGR).
-const OVERLAY_COLOR: COLORREF = COLORREF(0x00FA_A5_60);
+const OVERLAY_COLOR: COLORREF = COLORREF(0x00FA_A560);
 /// Overlay opacity: 64/255 ≈ 25%
 const OVERLAY_ALPHA: u8 = 64;
 
@@ -70,6 +75,8 @@ pub fn create() {
 
     let instance = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
     let brush = unsafe { CreateSolidBrush(OVERLAY_COLOR) };
+    // Store the brush handle for cleanup in destroy().
+    OVERLAY_BRUSH.store(brush.0 as isize, std::sync::atomic::Ordering::Relaxed);
 
     let wc = WNDCLASSW {
         lpfnWndProc: Some(overlay_wndproc),
@@ -185,5 +192,16 @@ pub fn destroy() {
             let _ = DestroyWindow(hwnd);
         }
         log::info!("overlay: destroyed");
+    }
+    // Delete the GDI brush that was registered with the window class.
+    let brush_val = OVERLAY_BRUSH.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if brush_val != 0 {
+        unsafe {
+            // SAFETY: brush_val was set from a valid HBRUSH returned by CreateSolidBrush,
+            // and this function is called at most once during shutdown (OnceLock guarantees
+            // the window is created only once). The brush is no longer in use after
+            // DestroyWindow has been called.
+            let _ = DeleteObject(HGDIOBJ(brush_val as *mut _));
+        }
     }
 }
