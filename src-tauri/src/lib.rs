@@ -21,8 +21,22 @@ use tauri_plugin_store::StoreExt;
 use window_vibrancy::apply_mica;
 
 pub fn run() {
-    env_logger::init();
-    log::info!("Glide starting");
+    // Allow runtime log level override: GLIDE_LOG=debug ./glide
+    // Valid values: error, warn, info, debug, trace (case-insensitive).
+    // Defaults to Info when unset or unrecognised.
+    let log_level: log::LevelFilter = std::env::var("GLIDE_LOG")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(log::LevelFilter::Info);
+    let _sentry_guard = sentry::init((
+        option_env!("SENTRY_DSN").unwrap_or(""),
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            // Capture 100% of errors; 0% of transactions (no perf overhead).
+            traces_sample_rate: 0.0,
+            ..Default::default()
+        },
+    ));
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
@@ -31,7 +45,22 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                ])
+                .level(log_level)
+                .max_file_size(50_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                .build(),
+        )
         .setup(|app| {
+            log::info!("Glide starting");
+
             #[cfg(target_os = "windows")]
             {
                 if let Some(window) = app.get_webview_window("main") {
@@ -82,7 +111,13 @@ pub fn run() {
 fn load_config(app: &tauri::App) -> AppConfig {
     match app.store("config.json") {
         Ok(store) => match store.get("config") {
-            Some(val) => serde_json::from_value(val.clone()).unwrap_or_default(),
+            Some(val) => match serde_json::from_value(val.clone()) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    log::warn!("config deserialize failed, using defaults: {}", e);
+                    AppConfig::default()
+                }
+            },
             None => {
                 let default = AppConfig::default();
                 if let Ok(val) = serde_json::to_value(&default) {
@@ -92,7 +127,10 @@ fn load_config(app: &tauri::App) -> AppConfig {
                 default
             }
         },
-        Err(_) => AppConfig::default(),
+        Err(e) => {
+            log::warn!("failed to open config store, using defaults: {}", e);
+            AppConfig::default()
+        }
     }
 }
 
@@ -103,8 +141,13 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .items(&[&settings_i, &quit_i])
         .build()?;
 
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or("default window icon not found")?;
+
     TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(icon)
         .menu(&menu)
         .tooltip("Glide")
         .show_menu_on_left_click(false)
@@ -113,6 +156,11 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 show_main_window(app);
             }
             "quit" => {
+                // Signal the hook thread to run its cleanup sequence
+                // (UnhookWindowsHookEx, worker shutdown, overlay destroy).
+                // Give it up to 500 ms before forcing exit.
+                hook::shutdown();
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 app.exit(0);
             }
             _ => {}
@@ -133,7 +181,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 let app = tray.app_handle();
-                show_main_window(&app);
+                show_main_window(app);
             }
             _ => {}
         })
