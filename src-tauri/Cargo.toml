@@ -2,7 +2,6 @@
 name = "glide"
 version = "0.1.0"
 description = "Modifier key + mouse window move/resize utility"
-authors = ["you"]
 edition = "2021"
 
 [lib]
@@ -23,7 +22,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
 log = "0.4"
-env_logger = "0.11"
+tauri-plugin-log = "2"
+sentry = "0.34"
 
 [dependencies.windows]
 version = "0.61"
