@@ -14,7 +14,10 @@ export interface AppConfig {
   snap_enabled: boolean;
   snap_threshold: number;
   scroll_opacity: boolean;
+  scroll_opacity_modifier: ModifierKey;
   middleclick_topmost: boolean;
+  drag_threshold: number;
+  snap_native: boolean;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -30,7 +33,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   snap_enabled: true,
   snap_threshold: 20,
   scroll_opacity: true,
+  scroll_opacity_modifier: 'alt',
   middleclick_topmost: true,
+  drag_threshold: 10,
+  snap_native: true,
 };
 
 export const MODIFIER_OPTIONS: { value: ModifierKey; label: string }[] = [
