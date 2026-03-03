@@ -1,6 +1,16 @@
 # Glide
 
+[![CI](https://github.com/wkdev/glide/actions/workflows/ci.yml/badge.svg)](https://github.com/wkdev/glide/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wkdev/glide)](https://github.com/wkdev/glide/releases)
+[![License](https://img.shields.io/github/license/wkdev/glide)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows-blue)
+
 A modifier key + mouse window move/resize utility for Windows. Hold a modifier key and use your mouse to move or resize any window without clicking the title bar.
+
+## Demo
+
+<!-- Add a screenshot or GIF demonstrating Glide in action. Place image files under assets/ and update the path below. -->
+<!-- ![Glide Demo](assets/demo.gif) -->
 
 ## Features
 
@@ -44,6 +54,7 @@ Access settings by clicking the Glide icon in your system tray. The following op
 | `resize_modifier_2`   | Second modifier for resizing                 | Shift     |
 | `filter_mode`         | Process filtering mode (whitelist/blacklist) | Blacklist |
 | `autostart`           | Launch on Windows startup                    | Off       |
+| `allow_nonforeground` | Allow move/resize on non-foreground windows  | On        |
 | `snap_enabled`        | Enable window snapping to grid               | On        |
 | `scroll_opacity`      | Allow opacity adjustment via scroll          | On        |
 | `middleclick_topmost` | Bring window to top on middle-click          | On        |
@@ -105,16 +116,16 @@ pnpm tauri build
 
 This generates:
 
-- **NSIS Installer** — `src-tauri/target/release/bundle/nsis/glide_0.1.0_x64-setup.exe`
-- **MSI Installer** — `src-tauri/target/release/bundle/msi/glide_0.1.0_x64.msi`
+- **NSIS Installer** — `src-tauri/target/release/bundle/nsis/glide_<version>_x64-setup.exe`
+- **MSI Installer** — `src-tauri/target/release/bundle/msi/glide_<version>_x64.msi`
 
 Both installers include the complete application and can be distributed to end users.
 
 ## Known Limitations
 
 - **Windows Only** — This utility is designed exclusively for Windows and does not support macOS or Linux
-- **Content Security Policy** — CSP is set to null for this application; this is a known security consideration and should be reviewed if the application expands in scope
-- **Foreground Window Requirement** — By default, the utility only works on the foreground window (configurable via `allow_nonforeground` setting)
+- **Content Security Policy** — `style-src 'unsafe-inline'` is required by the UI framework for inline styles
+- **Foreground Window Requirement** — By default, the utility works on **all windows** (including non-foreground). This can be restricted via the `allow_nonforeground` setting
 - **No Undo** — Window moves and resizes cannot be undone; they are immediate
 
 ## License

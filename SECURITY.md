@@ -33,19 +33,26 @@ Please do not disclose the vulnerability publicly until we have released a fix.
 
 ### Content Security Policy (CSP)
 
-The application currently has Content Security Policy (CSP) disabled (`"csp": null` in `src-tauri/tauri.conf.json`). This is a known limitation.
+The application enforces a strict Content Security Policy:
 
-**Why this is acceptable:**
+```
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'
+```
 
-- Glide only loads local assets from the application bundle
-- No remote content is loaded or executed
-- The application does not fetch resources from external URLs
-- All functionality is self-contained within the Tauri application
+This policy:
 
-**Future improvements:**
+- Blocks all external resource loading (scripts, styles, images, fonts)
+- Allows only bundled application assets (`'self'`)
+- Permits inline styles (`'unsafe-inline'`) required by the UI framework
+- Does not allow `eval()` or WebAssembly execution
 
-- Implementing a strict CSP is planned for a future update
-- This will further harden the application's security posture
+### Logging
+
+Application logs are stored in `AppData/Local/com.wkdev.glide/logs/` with automatic file rotation (50KB per file). Logs contain operational information only — no sensitive user data is recorded.
+
+### Crash Reporting
+
+Crash reporting via Sentry is available when the application is built with a `SENTRY_DSN` environment variable. When no DSN is provided (default), `sentry::init` is called with an empty DSN string, which causes the Sentry SDK to operate in a no-op mode with no network connections or data transmission. Crash reports capture panic backtraces only — no window titles, process names, or user activity data is transmitted.
 
 ## Security Best Practices
 
