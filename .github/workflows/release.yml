@@ -68,6 +68,56 @@ jobs:
           prerelease: false
           updaterJsonPreferNsis: true
 
+      - name: Create MSIX package
+        shell: pwsh
+        env:
+          MSIX_PUBLISHER: ${{ secrets.MSIX_PUBLISHER }}
+        run: |
+          $version    = (Get-Content package.json | ConvertFrom-Json).version
+          $msixVer    = "$version.0"
+          $publisher  = if ($env:MSIX_PUBLISHER) { $env:MSIX_PUBLISHER } else { 'CN=Glide' }
+          $stagingDir = 'msix_staging'
+          $outDir     = 'src-tauri/target/release/bundle/msix'
+          $pkgName    = "Glide_${version}_x64.msix"
+
+          New-Item -ItemType Directory -Force -Path "$stagingDir/Assets" | Out-Null
+          New-Item -ItemType Directory -Force -Path $outDir             | Out-Null
+
+          Copy-Item 'src-tauri/target/release/glide.exe' "$stagingDir/"
+
+          @(
+            'Square30x30Logo.png',  'Square44x44Logo.png',  'Square71x71Logo.png',
+            'Square89x89Logo.png',  'Square107x107Logo.png', 'Square142x142Logo.png',
+            'Square150x150Logo.png', 'Square284x284Logo.png', 'Square310x310Logo.png',
+            'StoreLogo.png'
+          ) | ForEach-Object { Copy-Item "src-tauri/icons/$_" "$stagingDir/Assets/$_" }
+
+          (Get-Content '.github/AppxManifest.xml' -Raw)
+            .Replace('{{PUBLISHER}}', $publisher)
+            .Replace('{{VERSION}}',   $msixVer) |
+            Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
+
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+                    Where-Object  { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+                    Sort-Object   Name -Descending |
+                    Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sdkBin) { Write-Error 'Windows SDK not found'; exit 1 }
+          $env:Path += ";$sdkBin\x64"
+
+          Write-Host "SDK: $sdkBin"
+          makeappx.exe pack /v /o /d $stagingDir /p "$outDir/$pkgName"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "MSIX created: $outDir/$pkgName"
+
+      - name: Upload MSIX to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $pkg     = "src-tauri/target/release/bundle/msix/Glide_${version}_x64.msix"
+          gh release upload '${{ github.ref_name }}' $pkg --clobber
+
       - name: Generate checksums
         shell: pwsh
         run: |
