@@ -291,7 +291,9 @@ pub fn raise_to_top(hwnd: HWND) {
             0,
             0,
             0,
-            SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0),
+            SET_WINDOW_POS_FLAGS(
+                SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0,
+            ),
         );
     }
 }
