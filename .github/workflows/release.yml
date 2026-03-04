@@ -10,6 +10,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -149,7 +151,7 @@ jobs:
           Write-Host 'MD5SUMS.txt:'    && Get-Content MD5SUMS.txt
 
       - name: Sign checksums with GPG
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        if: ${{ env.HAS_GPG_KEY == 'true' }}
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
