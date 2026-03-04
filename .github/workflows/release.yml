@@ -15,6 +15,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate signing secrets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          $failed = $false
+
+          # --- Tauri signing key ---
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Error '::error::TAURI_SIGNING_PRIVATE_KEY secret is empty or missing'
+            $failed = $true
+          } else {
+            Write-Host '✅ TAURI_SIGNING_PRIVATE_KEY is set'
+          }
+
+          # --- GPG key import + passphrase test ---
+          if ($env:GPG_PRIVATE_KEY) {
+            $keyFile = Join-Path $env:TEMP 'gpg_validate.asc'
+            $env:GPG_PRIVATE_KEY | Out-File $keyFile -Encoding ascii -NoNewline
+            $importOut = gpg --batch --import $keyFile 2>&1
+            Remove-Item $keyFile -ErrorAction SilentlyContinue
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "::error::GPG key import failed: $importOut"
+              $failed = $true
+            } else {
+              Write-Host '✅ GPG key imported successfully'
+
+              # test-sign a dummy payload to verify passphrase
+              'validate' | Out-File (Join-Path $env:TEMP 'gpg_test.txt') -Encoding utf8
+              $signOut = $env:GPG_PASSPHRASE | gpg --batch --yes --pinentry-mode loopback `
+                --passphrase-fd 0 --armor --detach-sign (Join-Path $env:TEMP 'gpg_test.txt') 2>&1
+              $signExit = $LASTEXITCODE
+              Remove-Item (Join-Path $env:TEMP 'gpg_test.txt'), (Join-Path $env:TEMP 'gpg_test.txt.asc') -ErrorAction SilentlyContinue
+
+              if ($signExit -ne 0) {
+                Write-Error "::error::GPG passphrase verification failed — check GPG_PASSPHRASE secret: $signOut"
+                $failed = $true
+              } else {
+                Write-Host '✅ GPG passphrase verified (test-sign succeeded)'
+              }
+            }
+          } else {
+            Write-Host '⚠️ GPG_PRIVATE_KEY not set — checksum signing will be skipped'
+          }
+
+          if ($failed) { exit 1 }
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9
