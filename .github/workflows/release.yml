@@ -94,10 +94,9 @@ jobs:
             'StoreLogo.png'
           ) | ForEach-Object { Copy-Item "src-tauri/icons/$_" "$stagingDir/Assets/$_" }
 
-          (Get-Content '.github/AppxManifest.xml' -Raw) `
-            .Replace('{{PUBLISHER}}', $publisher) `
-            .Replace('{{VERSION}}',   $msixVer) |
-            Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
+          $manifest = Get-Content '.github/AppxManifest.xml' -Raw
+          $manifest = $manifest.Replace('{{PUBLISHER}}', $publisher).Replace('{{VERSION}}', $msixVer)
+          $manifest | Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
 
           $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
                     Where-Object  { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
