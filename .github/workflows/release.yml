@@ -35,8 +35,13 @@ jobs:
 
           # --- GPG key import + passphrase test ---
           if ($env:GPG_PRIVATE_KEY) {
+            $raw = $env:GPG_PRIVATE_KEY
+            if ($raw -notmatch '-----BEGIN') {
+              try { $raw = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($raw)) }
+              catch { Write-Host 'GPG key is not base64, using as-is' }
+            }
             $keyFile = Join-Path $env:TEMP 'gpg_validate.asc'
-            $env:GPG_PRIVATE_KEY | Out-File $keyFile -Encoding ascii -NoNewline
+            [System.IO.File]::WriteAllText($keyFile, $raw)
             $importOut = gpg --batch --import $keyFile 2>&1
             Remove-Item $keyFile -ErrorAction SilentlyContinue
 
@@ -48,8 +53,7 @@ jobs:
 
               # test-sign a dummy payload to verify passphrase
               'validate' | Out-File (Join-Path $env:TEMP 'gpg_test.txt') -Encoding utf8
-              $signOut = $env:GPG_PASSPHRASE | gpg --batch --yes --pinentry-mode loopback `
-                --passphrase-fd 0 --armor --detach-sign (Join-Path $env:TEMP 'gpg_test.txt') 2>&1
+              $signOut = gpg --batch --yes --pinentry-mode loopback --passphrase $env:GPG_PASSPHRASE --armor --detach-sign (Join-Path $env:TEMP 'gpg_test.txt') 2>&1
               $signExit = $LASTEXITCODE
               Remove-Item (Join-Path $env:TEMP 'gpg_test.txt'), (Join-Path $env:TEMP 'gpg_test.txt.asc') -ErrorAction SilentlyContinue
 
@@ -207,11 +211,16 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         shell: pwsh
         run: |
-          $env:GPG_PRIVATE_KEY | Out-File "$env:TEMP\gpg_key.asc" -Encoding ascii -NoNewline
-          gpg --batch --import "$env:TEMP\gpg_key.asc"
-          Remove-Item "$env:TEMP\gpg_key.asc"
-          $env:GPG_PASSPHRASE | gpg --batch --yes --pinentry-mode loopback `
-            --passphrase-fd 0 --armor --detach-sign SHA256SUMS.txt
+          $raw = $env:GPG_PRIVATE_KEY
+          if ($raw -notmatch '-----BEGIN') {
+            try { $raw = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($raw)) }
+            catch { }
+          }
+          $keyFile = Join-Path $env:TEMP 'gpg_key.asc'
+          [System.IO.File]::WriteAllText($keyFile, $raw)
+          gpg --batch --import $keyFile
+          Remove-Item $keyFile
+          gpg --batch --yes --pinentry-mode loopback --passphrase $env:GPG_PASSPHRASE --armor --detach-sign SHA256SUMS.txt
 
       - name: Upload checksums to release
         env:
