@@ -1,4 +1,6 @@
-# Glide
+<p align="center">
+  <img src="assets/glide-readme-title.png" alt="Glide" />
+</p>
 
 [![CI](https://github.com/wkdev/glide/actions/workflows/ci.yml/badge.svg)](https://github.com/wkdev/glide/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/wkdev/glide)](https://github.com/wkdev/glide/releases)
