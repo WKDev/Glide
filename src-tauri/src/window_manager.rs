@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint, GA_ROOT,
     GWL_EXSTYLE, GWL_STYLE, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, SET_WINDOW_POS_FLAGS,
     SWP_NOACTIVATE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, WINDOWPLACEMENT, WS_CHILD,
-    WS_EX_LAYERED, WS_EX_TOPMOST,
+    WS_EX_LAYERED,
 };
 
 /// Flags not exported by the `windows` crate v0.61 — raw Win32 values.
@@ -247,41 +247,23 @@ pub fn set_window_opacity(hwnd: HWND, alpha: u8) {
 }
 
 // ---------------------------------------------------------------------------
-// Always-on-top
+// Z-order
 // ---------------------------------------------------------------------------
 
-pub fn is_topmost(hwnd: HWND) -> bool {
-    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
-    (ex_style & WS_EX_TOPMOST.0) != 0
-}
-
-/// Toggle always-on-top state. Returns the new state (true = topmost).
-pub fn toggle_topmost(hwnd: HWND) -> bool {
-    let was_topmost = is_topmost(hwnd);
-    let insert_after = if was_topmost {
-        HWND(-2isize as *mut std::ffi::c_void) // HWND_NOTOPMOST
-    } else {
-        HWND(-1isize as *mut std::ffi::c_void) // HWND_TOPMOST
-    };
-
+/// Raise window to the foreground Z-order.
+/// Combines SetForegroundWindow (most reliable, activates the window) with
+/// SetWindowPos(HWND_TOP) as a belt-and-suspenders fallback.
+pub fn raise_to_top(hwnd: HWND) {
+    // SetForegroundWindow is the standard Windows API for bringing a window to
+    // the top.  It activates the window — which is the expected behaviour for
+    // "raise on grab" since the user is interacting with it.
     unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            Some(insert_after),
-            0,
-            0,
-            0,
-            0,
-            SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0),
-        );
+        let _ = SetForegroundWindow(hwnd);
     }
 
-    !was_topmost
-}
-
-/// Raise window to the top of the non-topmost Z-order (HWND_TOP).
-/// Unlike SetForegroundWindow, this does NOT activate the window or set WS_EX_TOPMOST.
-pub fn raise_to_top(hwnd: HWND) {
+    // Fallback: also try SetWindowPos(HWND_TOP) without SWP_NOACTIVATE so the
+    // Z-order change takes effect even if SetForegroundWindow was denied by the
+    // OS foreground-lock policy.
     let hwnd_top = HWND(std::ptr::null_mut::<std::ffi::c_void>()); // HWND_TOP
     unsafe {
         let _ = SetWindowPos(
@@ -291,9 +273,7 @@ pub fn raise_to_top(hwnd: HWND) {
             0,
             0,
             0,
-            SET_WINDOW_POS_FLAGS(
-                SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOOWNERZORDER.0,
-            ),
+            SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0),
         );
     }
 }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-05
+
+### Added
+
+- Per-action enable/disable switches for Move and Resize in Modifier Keys section
+- Resize mode setting: "Resize from nearest corner" (quadrant) vs absolute direction
+- Scroll opacity controls moved to Modifier Keys section for better organization
+- Visual spacers (dividers) between setting panels for clearer grouping
+- Blacklist empty-state info message: "No processes are excluded. Glide will work on all windows."
+
+### Fixed
+
+- `raise_on_grab` (raise window on grab) now works reliably using `SetForegroundWindow` + `SetWindowPos` fallback
+- Unclosed delimiter in `hook.rs` resize logic
+
+### Removed
+
+- Middle-click always-on-top feature (`middleclick_topmost` config option and all related code)
+
 ## [0.1.1] - 2026-03-01
 
 ### Fixed

@@ -16,12 +16,27 @@ pub enum FilterMode {
     Blacklist,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResizeMode {
+    /// Direction depends on cursor position relative to window centre.
+    Quadrant,
+    /// Cursor right = grow right, cursor down = grow down, always.
+    Absolute,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub enabled: bool,
+    #[serde(default = "default_move_enabled")]
+    pub move_enabled: bool,
+    #[serde(default = "default_resize_enabled")]
+    pub resize_enabled: bool,
     pub move_modifier: ModifierKey,
     pub resize_modifier_1: ModifierKey,
     pub resize_modifier_2: ModifierKey,
+    #[serde(default = "default_resize_mode")]
+    pub resize_mode: ResizeMode,
     pub filter_mode: FilterMode,
     pub filter_list: Vec<String>,
     pub autostart: bool,
@@ -34,9 +49,20 @@ pub struct AppConfig {
     pub scroll_opacity: bool,
     #[serde(default = "default_scroll_opacity_modifier")]
     pub scroll_opacity_modifier: ModifierKey,
-    pub middleclick_topmost: bool,
     #[serde(default = "default_drag_threshold")]
     pub drag_threshold: i32,
+}
+
+fn default_move_enabled() -> bool {
+    true
+}
+
+fn default_resize_enabled() -> bool {
+    true
+}
+
+fn default_resize_mode() -> ResizeMode {
+    ResizeMode::Quadrant
 }
 
 fn default_drag_threshold() -> i32 {
@@ -55,9 +81,12 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            move_enabled: true,
+            resize_enabled: true,
             move_modifier: ModifierKey::Alt,
             resize_modifier_1: ModifierKey::Alt,
             resize_modifier_2: ModifierKey::Shift,
+            resize_mode: ResizeMode::Quadrant,
             filter_mode: FilterMode::Blacklist,
             filter_list: Vec::new(),
             autostart: false,
@@ -68,7 +97,6 @@ impl Default for AppConfig {
             snap_native: true,
             scroll_opacity: true,
             scroll_opacity_modifier: ModifierKey::Alt,
-            middleclick_topmost: true,
             drag_threshold: 10,
         }
     }
@@ -82,9 +110,12 @@ mod tests {
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.enabled, true);
+        assert_eq!(config.move_enabled, true);
+        assert_eq!(config.resize_enabled, true);
         assert_eq!(config.move_modifier, ModifierKey::Alt);
         assert_eq!(config.resize_modifier_1, ModifierKey::Alt);
         assert_eq!(config.resize_modifier_2, ModifierKey::Shift);
+        assert_eq!(config.resize_mode, ResizeMode::Quadrant);
         assert_eq!(config.filter_mode, FilterMode::Blacklist);
         assert_eq!(config.filter_list, Vec::<String>::new());
         assert_eq!(config.autostart, false);
@@ -93,7 +124,6 @@ mod tests {
         assert_eq!(config.snap_enabled, true);
         assert_eq!(config.snap_threshold, 20);
         assert_eq!(config.scroll_opacity, true);
-        assert_eq!(config.middleclick_topmost, true);
         assert_eq!(config.drag_threshold, 10);
         assert_eq!(config.snap_native, true);
         assert_eq!(config.scroll_opacity_modifier, ModifierKey::Alt);
@@ -106,9 +136,12 @@ mod tests {
         let deserialized: AppConfig = serde_json::from_value(json).expect("deserialize failed");
 
         assert_eq!(deserialized.enabled, original.enabled);
+        assert_eq!(deserialized.move_enabled, original.move_enabled);
+        assert_eq!(deserialized.resize_enabled, original.resize_enabled);
         assert_eq!(deserialized.move_modifier, original.move_modifier);
         assert_eq!(deserialized.resize_modifier_1, original.resize_modifier_1);
         assert_eq!(deserialized.resize_modifier_2, original.resize_modifier_2);
+        assert_eq!(deserialized.resize_mode, original.resize_mode);
         assert_eq!(deserialized.filter_mode, original.filter_mode);
         assert_eq!(deserialized.filter_list, original.filter_list);
         assert_eq!(deserialized.autostart, original.autostart);
@@ -120,10 +153,6 @@ mod tests {
         assert_eq!(deserialized.snap_enabled, original.snap_enabled);
         assert_eq!(deserialized.snap_threshold, original.snap_threshold);
         assert_eq!(deserialized.scroll_opacity, original.scroll_opacity);
-        assert_eq!(
-            deserialized.middleclick_topmost,
-            original.middleclick_topmost
-        );
         assert_eq!(deserialized.drag_threshold, original.drag_threshold);
         assert_eq!(deserialized.snap_native, original.snap_native);
         assert_eq!(
@@ -136,9 +165,12 @@ mod tests {
     fn test_serde_round_trip_all_non_default() {
         let original = AppConfig {
             enabled: false,
+            move_enabled: false,
+            resize_enabled: false,
             move_modifier: ModifierKey::Ctrl,
             resize_modifier_1: ModifierKey::Win,
             resize_modifier_2: ModifierKey::Ctrl,
+            resize_mode: ResizeMode::Absolute,
             filter_mode: FilterMode::Whitelist,
             filter_list: vec!["notepad.exe".to_string(), "calc.exe".to_string()],
             autostart: true,
@@ -147,7 +179,6 @@ mod tests {
             snap_enabled: false,
             snap_threshold: 50,
             scroll_opacity: false,
-            middleclick_topmost: false,
             drag_threshold: 30,
             snap_native: false,
             scroll_opacity_modifier: ModifierKey::Ctrl,
@@ -156,9 +187,12 @@ mod tests {
         let deserialized: AppConfig = serde_json::from_value(json).expect("deserialize failed");
 
         assert_eq!(deserialized.enabled, original.enabled);
+        assert_eq!(deserialized.move_enabled, original.move_enabled);
+        assert_eq!(deserialized.resize_enabled, original.resize_enabled);
         assert_eq!(deserialized.move_modifier, original.move_modifier);
         assert_eq!(deserialized.resize_modifier_1, original.resize_modifier_1);
         assert_eq!(deserialized.resize_modifier_2, original.resize_modifier_2);
+        assert_eq!(deserialized.resize_mode, original.resize_mode);
         assert_eq!(deserialized.filter_mode, original.filter_mode);
         assert_eq!(deserialized.filter_list, original.filter_list);
         assert_eq!(deserialized.autostart, original.autostart);
@@ -170,10 +204,6 @@ mod tests {
         assert_eq!(deserialized.snap_enabled, original.snap_enabled);
         assert_eq!(deserialized.snap_threshold, original.snap_threshold);
         assert_eq!(deserialized.scroll_opacity, original.scroll_opacity);
-        assert_eq!(
-            deserialized.middleclick_topmost,
-            original.middleclick_topmost
-        );
         assert_eq!(deserialized.drag_threshold, original.drag_threshold);
         assert_eq!(deserialized.snap_native, original.snap_native);
         assert_eq!(
@@ -227,6 +257,27 @@ mod tests {
     }
 
     #[test]
+    fn test_resize_mode_serialization() {
+        assert_eq!(
+            serde_json::to_value(ResizeMode::Quadrant).unwrap(),
+            "quadrant"
+        );
+        assert_eq!(
+            serde_json::to_value(ResizeMode::Absolute).unwrap(),
+            "absolute"
+        );
+    }
+
+    #[test]
+    fn test_resize_mode_deserialization() {
+        let quadrant: ResizeMode = serde_json::from_value(serde_json::json!("quadrant")).unwrap();
+        assert_eq!(quadrant, ResizeMode::Quadrant);
+
+        let absolute: ResizeMode = serde_json::from_value(serde_json::json!("absolute")).unwrap();
+        assert_eq!(absolute, ResizeMode::Absolute);
+    }
+
+    #[test]
     fn test_invalid_modifier_key_deserialization() {
         let result: Result<ModifierKey, _> = serde_json::from_value(serde_json::json!("invalid"));
         assert!(result.is_err());
@@ -235,6 +286,12 @@ mod tests {
     #[test]
     fn test_invalid_filter_mode_deserialization() {
         let result: Result<FilterMode, _> = serde_json::from_value(serde_json::json!("invalid"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_resize_mode_deserialization() {
+        let result: Result<ResizeMode, _> = serde_json::from_value(serde_json::json!("invalid"));
         assert!(result.is_err());
     }
 
@@ -263,12 +320,40 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_config_without_new_fields() {
+        // Ensure old configs (without move_enabled, resize_enabled, resize_mode) still load.
+        let json = serde_json::json!({
+            "enabled": true,
+            "move_modifier": "alt",
+            "resize_modifier_1": "alt",
+            "resize_modifier_2": "shift",
+            "filter_mode": "blacklist",
+            "filter_list": [],
+            "autostart": false,
+            "allow_nonforeground": true,
+            "raise_on_grab": false,
+            "snap_enabled": true,
+            "snap_threshold": 20,
+            "scroll_opacity": true,
+            "drag_threshold": 10,
+            "snap_native": true
+        });
+        let config: AppConfig = serde_json::from_value(json).expect("legacy config should load");
+        assert_eq!(config.move_enabled, true);
+        assert_eq!(config.resize_enabled, true);
+        assert_eq!(config.resize_mode, ResizeMode::Quadrant);
+    }
+
+    #[test]
     fn test_filter_list_with_multiple_entries() {
         let config = AppConfig {
             enabled: true,
+            move_enabled: true,
+            resize_enabled: true,
             move_modifier: ModifierKey::Alt,
             resize_modifier_1: ModifierKey::Alt,
             resize_modifier_2: ModifierKey::Shift,
+            resize_mode: ResizeMode::Quadrant,
             filter_mode: FilterMode::Whitelist,
             filter_list: vec![
                 "app1.exe".to_string(),
@@ -281,7 +366,6 @@ mod tests {
             snap_enabled: true,
             snap_threshold: 20,
             scroll_opacity: true,
-            middleclick_topmost: true,
             drag_threshold: 10,
             snap_native: true,
             scroll_opacity_modifier: ModifierKey::Alt,

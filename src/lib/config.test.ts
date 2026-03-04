@@ -1,14 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_CONFIG, MODIFIER_OPTIONS } from './config';
-import type { AppConfig, ModifierKey, FilterMode } from './config';
+import type { AppConfig, ModifierKey, FilterMode, ResizeMode } from './config';
 
 describe('DEFAULT_CONFIG', () => {
   it('has all required fields defined', () => {
     const keys: (keyof AppConfig)[] = [
       'enabled',
+      'move_enabled',
+      'resize_enabled',
       'move_modifier',
       'resize_modifier_1',
       'resize_modifier_2',
+      'resize_mode',
       'filter_mode',
       'filter_list',
       'autostart',
@@ -18,7 +21,6 @@ describe('DEFAULT_CONFIG', () => {
       'snap_threshold',
       'scroll_opacity',
       'scroll_opacity_modifier',
-      'middleclick_topmost',
       'drag_threshold',
       'snap_native',
     ];
@@ -77,10 +79,17 @@ describe('DEFAULT_CONFIG', () => {
     expect(DEFAULT_CONFIG.scroll_opacity_modifier).toBe('alt');
   });
 
-  it('enables middle-click topmost by default', () => {
-    expect(DEFAULT_CONFIG.middleclick_topmost).toBe(true);
+  it('enables move by default', () => {
+    expect(DEFAULT_CONFIG.move_enabled).toBe(true);
   });
 
+  it('enables resize by default', () => {
+    expect(DEFAULT_CONFIG.resize_enabled).toBe(true);
+  });
+
+  it('uses quadrant resize mode by default', () => {
+    expect(DEFAULT_CONFIG.resize_mode).toBe('quadrant');
+  });
   it('has a non-negative drag threshold', () => {
     expect(DEFAULT_CONFIG.drag_threshold).toBeGreaterThanOrEqual(0);
   });
@@ -141,5 +150,10 @@ describe('type compatibility', () => {
     expect(modifiers).toContain(DEFAULT_CONFIG.resize_modifier_1);
     expect(modifiers).toContain(DEFAULT_CONFIG.resize_modifier_2);
     expect(modifiers).toContain(DEFAULT_CONFIG.scroll_opacity_modifier);
+  });
+
+  it('resize_mode type accepts only valid values', () => {
+    const modes: ResizeMode[] = ['quadrant', 'absolute'];
+    expect(modes).toContain(DEFAULT_CONFIG.resize_mode);
   });
 });

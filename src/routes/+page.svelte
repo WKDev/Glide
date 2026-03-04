@@ -237,7 +237,7 @@
           <div class="panel">
             <h2 class="panel-title">Modifier Keys</h2>
             <section class="card">
-              <div class="mod-group">
+              <div class="mod-group" class:row-disabled={!config.move_enabled}>
                 <div class="mod-row">
                   <span class="mod-label">Move</span>
                   <Select.Root type="single" bind:value={config.move_modifier}>
@@ -258,12 +258,22 @@
                       {/each}
                     </Select.Content>
                   </Select.Root>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.move_enabled}
+                    aria-label="Toggle move feature"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
                 </div>
                 <span class="mod-desc"
                   >Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span
                 >
               </div>
-              <div class="mod-group">
+              <div
+                class="mod-group"
+                class:row-disabled={!config.resize_enabled}
+              >
                 <div class="mod-row">
                   <span class="mod-label">Resize</span>
                   <div class="resize-pair">
@@ -311,14 +321,85 @@
                       </Select.Content>
                     </Select.Root>
                   </div>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.resize_enabled}
+                    aria-label="Toggle resize feature"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
                 </div>
                 <span class="mod-desc"
                   >Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + right-click
                   drag to resize</span
                 >
               </div>
+              <div
+                class="row-item-group"
+                class:row-disabled={!config.resize_enabled}
+              >
+                <div class="row-item">
+                  <span class="row-label">Resize from nearest corner</span>
+                  <Switch.Root
+                    class="toggle"
+                    checked={config.resize_mode === 'quadrant'}
+                    onCheckedChange={(v) =>
+                      (config.resize_mode = v ? 'quadrant' : 'absolute')}
+                    disabled={!config.resize_enabled}
+                    aria-label="Toggle resize from nearest corner"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="row-desc"
+                  >When on, resize direction depends on cursor position. When
+                  off, the window always grows toward the cursor direction.</span
+                >
+              </div>
+
+              <hr class="panel-divider" />
+
+              <div class="mod-group">
+                <div class="mod-row">
+                  <span class="mod-label">Opacity</span>
+                  <Select.Root
+                    type="single"
+                    bind:value={config.scroll_opacity_modifier}
+                  >
+                    <Select.Trigger
+                      class="select-trigger"
+                      aria-label="Scroll opacity modifier"
+                    >
+                      <span class="select-value">{scrollOpacityLabel}</span>
+                      <span class="select-caret">▾</span>
+                    </Select.Trigger>
+                    <Select.Content class="select-content" sideOffset={4}>
+                      {#each MODIFIER_OPTIONS as opt (opt.value)}
+                        <Select.Item
+                          class="select-item"
+                          value={opt.value}
+                          label={opt.label}>{opt.label}</Select.Item
+                        >
+                      {/each}
+                    </Select.Content>
+                  </Select.Root>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.scroll_opacity}
+                    aria-label="Toggle scroll opacity"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="mod-desc"
+                  >Hold <kbd>{scrollOpacityLabel}</kbd> + scroll to adjust window
+                  transparency</span
+                >
+              </div>
             </section>
           </div>
+
+          <hr class="section-spacer" />
 
           <div class="panel">
             <h2 class="panel-title">Behavior</h2>
@@ -392,61 +473,6 @@
               </div>
               <div class="row-item-group">
                 <div class="row-item">
-                  <span class="row-label">Scroll to change opacity</span>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.scroll_opacity}
-                    aria-label="Toggle scroll opacity"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >Hold modifier key and scroll to adjust window transparency.</span
-                >
-              </div>
-              <div class="row-item" class:row-disabled={!config.scroll_opacity}>
-                <span class="row-label">Scroll opacity modifier</span>
-                <Select.Root
-                  type="single"
-                  bind:value={config.scroll_opacity_modifier}
-                >
-                  <Select.Trigger
-                    class="select-trigger"
-                    aria-label="Scroll opacity modifier"
-                  >
-                    <span class="select-value">{scrollOpacityLabel}</span>
-                    <span class="select-caret">▾</span>
-                  </Select.Trigger>
-                  <Select.Content class="select-content" sideOffset={4}>
-                    {#each MODIFIER_OPTIONS as opt (opt.value)}
-                      <Select.Item
-                        class="select-item"
-                        value={opt.value}
-                        label={opt.label}>{opt.label}</Select.Item
-                      >
-                    {/each}
-                  </Select.Content>
-                </Select.Root>
-              </div>
-              <div class="row-item-group">
-                <div class="row-item">
-                  <span class="row-label">Middle-click always-on-top</span>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.middleclick_topmost}
-                    aria-label="Toggle middle-click always-on-top"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >Middle-click a window while holding modifier to pin it on
-                  top.</span
-                >
-              </div>
-              <div class="row-item-group">
-                <div class="row-item">
                   <span class="row-label">Drag threshold</span>
                   <div class="slider-group">
                     <input
@@ -466,6 +492,8 @@
               </div>
             </section>
           </div>
+
+          <hr class="section-spacer" />
 
           <div class="panel">
             <h2 class="panel-title">Autostart</h2>
@@ -574,6 +602,14 @@
                   >
                 </div>
               {/if}
+              {#if config.filter_mode === 'blacklist' && config.filter_list.length === 0}
+                <div class="blacklist-info">
+                  <span class="info-icon">ℹ</span>
+                  <span
+                    >No processes are excluded. Glide will work on all windows.</span
+                  >
+                </div>
+              {/if}
             </section>
           </div>
         </section>
@@ -588,6 +624,9 @@
               <p>Keyboard-assisted window move/resize utility for Windows.</p>
             </section>
           </div>
+
+          <hr class="section-spacer" />
+
           <div class="panel">
             <h2 class="panel-title">Update</h2>
             <section class="card">
@@ -849,6 +888,20 @@
 
   .group > .panel + .panel {
     margin-top: 11px;
+  }
+
+  .section-spacer {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 14px 0;
+    opacity: 0.6;
+  }
+
+  .panel-divider {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 10px 0;
+    opacity: 0.4;
   }
 
   .panel-title {
@@ -1349,6 +1402,26 @@
     line-height: 1.3;
   }
 
+  .blacklist-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 7px;
+    background: rgb(100 160 255 / 0.08);
+    border: 1px solid rgb(100 140 200 / 0.25);
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+
+  .info-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1.3;
+  }
+
   .about-value {
     color: var(--muted);
     font-size: 12.5px;
@@ -1448,6 +1521,12 @@
       background: rgb(255 200 50 / 0.08);
       border-color: rgb(200 170 50 / 0.25);
       color: #e0c050;
+    }
+
+    .blacklist-info {
+      background: rgb(100 160 255 / 0.06);
+      border-color: rgb(100 150 220 / 0.2);
+      color: var(--muted-2);
     }
   }
 

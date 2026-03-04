@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WH_MOUSE_LL, WM_KEYDOWN, WM_MOUSEMOVE, WM_QUIT, WM_SYSKEYDOWN,
 };
 
-use crate::config::{AppConfig, FilterMode, ModifierKey};
+use crate::config::{AppConfig, FilterMode, ModifierKey, ResizeMode};
 use crate::overlay;
 use crate::snap;
 use crate::window_manager;
@@ -35,7 +35,6 @@ const WORKER_QUEUE_SIZE: usize = 1024;
 const GLIDE_SYNTHETIC_EXTRA_INFO: usize = 0x474C_4944; // b'G','L','I','D'
 /// Mouse message constants not in the windows crate import set.
 const WM_MOUSEWHEEL: u32 = 0x020A;
-const WM_MBUTTONDOWN: u32 = 0x0207;
 
 /// Opacity change per scroll tick (out of 255).
 const OPACITY_STEP: i32 = 15;
@@ -57,7 +56,7 @@ static RESIZE_MASK: AtomicU32 = AtomicU32::new(MOD_ALT | MOD_SHIFT);
 
 /// Feature flags — readable from the hook thread without touching the config mutex.
 static SCROLL_OPACITY_ACTIVE: AtomicBool = AtomicBool::new(true);
-static MIDDLECLICK_TOPMOST_ACTIVE: AtomicBool = AtomicBool::new(true);
+
 static SCROLL_OPACITY_MASK: AtomicU32 = AtomicU32::new(MOD_ALT);
 
 /// Bitset tracking currently-pressed non-modifier keys, updated by `keyboard_hook_proc`.
@@ -122,10 +121,6 @@ enum WorkerEvent {
     MouseWheel {
         point: POINT,
         delta: i16,
-        mods: u32,
-    },
-    MiddleClick {
-        point: POINT,
         mods: u32,
     },
     /// Sent by the hook thread to signal the worker to exit cleanly.
@@ -284,13 +279,11 @@ fn update_hook_state(config: &AppConfig) {
         modifier_to_mask(config.scroll_opacity_modifier),
         Ordering::Release,
     );
-    MIDDLECLICK_TOPMOST_ACTIVE.store(config.middleclick_topmost, Ordering::Release);
     log::debug!(
-        "hook state updated: move={:#x} resize={:#x} scroll_opacity={} middleclick_topmost={}",
+        "hook state updated: move={:#x} resize={:#x} scroll_opacity={}",
         move_m,
         resize_m,
         config.scroll_opacity,
-        config.middleclick_topmost,
     );
 }
 
@@ -314,15 +307,19 @@ fn process_allowed(config: &AppConfig, process_name: &str) -> bool {
 /// is holding exactly the configured modifier keys and nothing else.
 fn determine_mode(mods: u32, config: &AppConfig) -> Option<DragMode> {
     // Check resize first — it requires strictly more modifiers than move.
-    let resize_mask =
-        modifier_to_mask(config.resize_modifier_1) | modifier_to_mask(config.resize_modifier_2);
-    if resize_mask != 0 && mods == resize_mask {
-        return Some(DragMode::Resize);
+    if config.resize_enabled {
+        let resize_mask =
+            modifier_to_mask(config.resize_modifier_1) | modifier_to_mask(config.resize_modifier_2);
+        if resize_mask != 0 && mods == resize_mask {
+            return Some(DragMode::Resize);
+        }
     }
 
-    let move_mask = modifier_to_mask(config.move_modifier);
-    if move_mask != 0 && mods == move_mask {
-        return Some(DragMode::Move);
+    if config.move_enabled {
+        let move_mask = modifier_to_mask(config.move_modifier);
+        if move_mask != 0 && mods == move_mask {
+            return Some(DragMode::Move);
+        }
     }
 
     None
@@ -451,12 +448,6 @@ fn commit_grab(grab: &mut GrabState, config: &AppConfig, point: POINT) {
 
 fn set_active_grab(active: bool) {
     ACTIVE_GRAB.store(active, Ordering::Relaxed);
-}
-
-/// Check if the modifier key(s) for "move" action are currently held (exact match).
-fn is_move_modifier_held(mods: u32) -> bool {
-    let move_mask = MOVE_MASK.load(Ordering::Acquire);
-    move_mask != 0 && mods == move_mask
 }
 
 /// Process a mouse-move event on the worker thread.
@@ -633,25 +624,33 @@ fn worker_handle_mouse_move(
         }
         DragMode::Resize => {
             let mut r = grab.origin_rect;
-            match grab.resize_dir {
-                ResizeDirection::TopLeft => {
-                    r.left += grab.cumulative_dx;
-                    r.top += grab.cumulative_dy;
+            if config.resize_mode == ResizeMode::Absolute {
+                // Absolute mode: cursor right = grow right, cursor down = grow down.
+                r.right += grab.cumulative_dx;
+                r.bottom += grab.cumulative_dy;
+                clamp_rect_for_min_size(&mut r, ResizeDirection::BottomRight);
+            } else {
+                // Quadrant mode: direction depends on cursor position.
+                match grab.resize_dir {
+                    ResizeDirection::TopLeft => {
+                        r.left += grab.cumulative_dx;
+                        r.top += grab.cumulative_dy;
+                    }
+                    ResizeDirection::TopRight => {
+                        r.right += grab.cumulative_dx;
+                        r.top += grab.cumulative_dy;
+                    }
+                    ResizeDirection::BottomLeft => {
+                        r.left += grab.cumulative_dx;
+                        r.bottom += grab.cumulative_dy;
+                    }
+                    ResizeDirection::BottomRight => {
+                        r.right += grab.cumulative_dx;
+                        r.bottom += grab.cumulative_dy;
+                    }
                 }
-                ResizeDirection::TopRight => {
-                    r.right += grab.cumulative_dx;
-                    r.top += grab.cumulative_dy;
-                }
-                ResizeDirection::BottomLeft => {
-                    r.left += grab.cumulative_dx;
-                    r.bottom += grab.cumulative_dy;
-                }
-                ResizeDirection::BottomRight => {
-                    r.right += grab.cumulative_dx;
-                    r.bottom += grab.cumulative_dy;
-                }
+                clamp_rect_for_min_size(&mut r, grab.resize_dir);
             }
-            clamp_rect_for_min_size(&mut r, grab.resize_dir);
             window_manager::resize_window(
                 grab.hwnd,
                 r.left,
@@ -700,30 +699,6 @@ fn worker_handle_scroll(point: POINT, delta: i16, mods: u32) {
     log::debug!("opacity: {} → {} (delta={})", current, new_alpha, delta);
 }
 
-/// Handle middle-click — modifier + middle-click toggles always-on-top.
-fn worker_handle_middleclick(point: POINT, mods: u32) {
-    let Some(config) = current_config() else {
-        return;
-    };
-    if !config.enabled || !config.middleclick_topmost {
-        return;
-    }
-
-    if !is_move_modifier_held(mods) {
-        return;
-    }
-
-    let Some(hwnd) = window_manager::window_from_point(point.x, point.y) else {
-        return;
-    };
-    if !window_manager::is_valid_target(hwnd) {
-        return;
-    }
-
-    let new_state = window_manager::toggle_topmost(hwnd);
-    log::debug!("topmost toggled: {}", new_state);
-}
-
 fn worker_loop(rx: Receiver<WorkerEvent>) {
     let mut state: Option<GrabState> = None;
     // A non-MouseMove event encountered while draining mouse-move events.
@@ -756,9 +731,6 @@ fn worker_loop(rx: Receiver<WorkerEvent>) {
             WorkerEvent::MouseWheel { point, delta, mods } => {
                 worker_handle_scroll(point, delta, mods);
             }
-            WorkerEvent::MiddleClick { point, mods } => {
-                worker_handle_middleclick(point, mods);
-            }
         }
     }
     log::info!("worker loop exited");
@@ -782,7 +754,7 @@ fn drain_to_latest_mouse_move(
             WorkerEvent::MouseMove { .. } => {
                 latest = ev;
             }
-            // Non-move event (Shutdown, MouseWheel, MiddleClick): stop draining
+            // Non-move event (Shutdown, MouseWheel): stop draining
             // and hand it back to the caller so it is not silently dropped.
             other => return (latest, Some(other)),
         }
@@ -978,28 +950,6 @@ unsafe extern "system" fn mouse_hook_proc(
                     let _ = tx.try_send(WorkerEvent::MouseWheel {
                         point: mouse.pt,
                         delta,
-                        mods,
-                    });
-                }
-                LRESULT(1) // Swallow
-            } else {
-                unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
-            }
-        }
-
-        WM_MBUTTONDOWN => {
-            // CHANGED: poll via GetAsyncKeyState — immune to keyboard hook removal.
-            // Revert: `let mods = MODIFIER_STATE.load(Ordering::Acquire);`
-            let mods = poll_modifiers();
-            let move_mask = MOVE_MASK.load(Ordering::Acquire);
-            let feature_active = MIDDLECLICK_TOPMOST_ACTIVE.load(Ordering::Relaxed);
-
-            if feature_active && move_mask != 0 && mods == move_mask && !any_non_modifier_key_down()
-            {
-                let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
-                if let Some(tx) = WORKER_TX.get() {
-                    let _ = tx.try_send(WorkerEvent::MiddleClick {
-                        point: mouse.pt,
                         mods,
                     });
                 }
@@ -1406,6 +1356,45 @@ mod tests {
         );
         // Alt + Win → None (extra Win)
         assert_eq!(determine_mode(MOD_ALT | MOD_WIN, &config), None);
+    }
+
+    #[test]
+    fn test_determine_mode_move_disabled() {
+        let config = AppConfig {
+            move_enabled: false,
+            ..AppConfig::default()
+        };
+        // Move modifier held but move is disabled → None
+        assert_eq!(determine_mode(MOD_ALT, &config), None);
+        // Resize still works when move is disabled
+        assert_eq!(
+            determine_mode(MOD_ALT | MOD_SHIFT, &config),
+            Some(DragMode::Resize)
+        );
+    }
+
+    #[test]
+    fn test_determine_mode_resize_disabled() {
+        let config = AppConfig {
+            resize_enabled: false,
+            ..AppConfig::default()
+        };
+        // Resize modifier held but resize is disabled → falls through to move check
+        // Since Alt+Shift != Alt (exact match), this is None anyway.
+        assert_eq!(determine_mode(MOD_ALT | MOD_SHIFT, &config), None);
+        // Move still works when resize is disabled
+        assert_eq!(determine_mode(MOD_ALT, &config), Some(DragMode::Move));
+    }
+
+    #[test]
+    fn test_determine_mode_both_disabled() {
+        let config = AppConfig {
+            move_enabled: false,
+            resize_enabled: false,
+            ..AppConfig::default()
+        };
+        assert_eq!(determine_mode(MOD_ALT, &config), None);
+        assert_eq!(determine_mode(MOD_ALT | MOD_SHIFT, &config), None);
     }
 
     // ===== Tests for determine_resize_direction =====
