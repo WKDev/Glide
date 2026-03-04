@@ -129,10 +129,14 @@ jobs:
         shell: pwsh
         env:
           MSIX_PUBLISHER: ${{ secrets.MSIX_PUBLISHER }}
+          MSIX_IDENTITY_NAME: ${{ secrets.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ secrets.MSIX_PUBLISHER_DISPLAY_NAME }}
         run: |
-          $version    = (Get-Content package.json | ConvertFrom-Json).version
-          $msixVer    = "$version.0"
-          $publisher  = if ($env:MSIX_PUBLISHER) { $env:MSIX_PUBLISHER } else { 'CN=Glide' }
+          $version              = (Get-Content package.json | ConvertFrom-Json).version
+          $msixVer              = "$version.0"
+          $publisher            = if ($env:MSIX_PUBLISHER) { $env:MSIX_PUBLISHER } else { 'CN=Glide' }
+          $identityName         = if ($env:MSIX_IDENTITY_NAME) { $env:MSIX_IDENTITY_NAME } else { 'com.wkdev.glide' }
+          $publisherDisplayName = if ($env:MSIX_PUBLISHER_DISPLAY_NAME) { $env:MSIX_PUBLISHER_DISPLAY_NAME } else { 'wkdev' }
           $stagingDir = 'msix_staging'
           $outDir     = 'src-tauri/target/release/bundle/msix'
           $pkgName    = "Glide_${version}_x64.msix"
@@ -151,6 +155,8 @@ jobs:
 
           $manifest = Get-Content '.github/AppxManifest.xml' -Raw
           $manifest = $manifest.Replace('{{PUBLISHER}}', $publisher).Replace('{{VERSION}}', $msixVer)
+          $manifest = $manifest.Replace('{{IDENTITY_NAME}}', $identityName)
+          $manifest = $manifest.Replace('{{PUBLISHER_DISPLAY_NAME}}', $publisherDisplayName)
           $manifest | Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
 
           $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |

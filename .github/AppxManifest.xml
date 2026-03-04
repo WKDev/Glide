@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   AppxManifest template for MSIX packaging.
-  {{PUBLISHER}} and {{VERSION}} are replaced at build time by the release workflow.
+  {{PUBLISHER}}, {{VERSION}}, {{IDENTITY_NAME}}, and {{PUBLISHER_DISPLAY_NAME}}
+  are replaced at build time by the release workflow.
 
-  MSIX_PUBLISHER secret:
-    - For Microsoft Store submission: set to the Publisher DN from Partner Center
-      e.g. "CN=00000000-0000-0000-0000-000000000000"
-    - If the secret is unset, "CN=Glide" is used (unsigned build, Store-compatible).
-    - For sideload distribution: must match the signing certificate Subject.
+  GitHub Secrets (from Partner Center > Product Identity):
+    - MSIX_PUBLISHER:              Package/Identity/Publisher (e.g. "CN=00000000-...")
+    - MSIX_IDENTITY_NAME:          Package/Identity/Name (e.g. "12345Publisher.Glide")
+    - MSIX_PUBLISHER_DISPLAY_NAME: Package/Properties/PublisherDisplayName
+
+  If secrets are unset, defaults are used for local/sideload builds.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -16,14 +18,14 @@
   IgnorableNamespaces="uap3 rescap">
 
   <Identity
-    Name="com.wkdev.glide"
+    Name="{{IDENTITY_NAME}}"
     Publisher="{{PUBLISHER}}"
     Version="{{VERSION}}"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Glide</DisplayName>
-    <PublisherDisplayName>wkdev</PublisherDisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
