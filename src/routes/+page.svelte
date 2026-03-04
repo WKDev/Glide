@@ -259,7 +259,9 @@
                     </Select.Content>
                   </Select.Root>
                 </div>
-                <span class="mod-desc">Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span>
+                <span class="mod-desc"
+                  >Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span
+                >
               </div>
               <div class="mod-group">
                 <div class="mod-row">
@@ -310,7 +312,10 @@
                     </Select.Root>
                   </div>
                 </div>
-                <span class="mod-desc">Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + right-click drag to resize</span>
+                <span class="mod-desc"
+                  >Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + right-click
+                  drag to resize</span
+                >
               </div>
             </section>
           </div>
@@ -329,7 +334,10 @@
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="row-desc">Move or resize windows even when they are behind other windows.</span>
+                <span class="row-desc"
+                  >Move or resize windows even when they are behind other
+                  windows.</span
+                >
               </div>
               <div class="row-item-group">
                 <div class="row-item">
@@ -342,7 +350,10 @@
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="row-desc">Bring the window to the foreground when you start dragging it.</span>
+                <span class="row-desc"
+                  >Bring the window to the foreground when you start dragging
+                  it.</span
+                >
               </div>
               <div class="row-item-group">
                 <div class="row-item">
@@ -355,9 +366,14 @@
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="row-desc">Snap windows to screen edges when dragging near them.</span>
+                <span class="row-desc"
+                  >Snap windows to screen edges when dragging near them.</span
+                >
               </div>
-              <div class="row-item-group" class:row-disabled={!config.snap_enabled}>
+              <div
+                class="row-item-group"
+                class:row-disabled={!config.snap_enabled}
+              >
                 <div class="row-item">
                   <span class="row-label">Use Windows 11 snap groups</span>
                   <Switch.Root
@@ -369,7 +385,10 @@
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="row-desc">Use the native Windows 11 snap layout instead of built-in snapping.</span>
+                <span class="row-desc"
+                  >Use the native Windows 11 snap layout instead of built-in
+                  snapping.</span
+                >
               </div>
               <div class="row-item-group">
                 <div class="row-item">
@@ -382,7 +401,9 @@
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="row-desc">Hold modifier key and scroll to adjust window transparency.</span>
+                <span class="row-desc"
+                  >Hold modifier key and scroll to adjust window transparency.</span
+                >
               </div>
               <div class="row-item" class:row-disabled={!config.scroll_opacity}>
                 <span class="row-label">Scroll opacity modifier</span>
@@ -419,7 +440,10 @@
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="row-desc">Middle-click a window while holding modifier to pin it on top.</span>
+                <span class="row-desc"
+                  >Middle-click a window while holding modifier to pin it on
+                  top.</span
+                >
               </div>
               <div class="row-item-group">
                 <div class="row-item">
@@ -436,7 +460,9 @@
                     <span class="slider-value">{config.drag_threshold}px</span>
                   </div>
                 </div>
-                <span class="row-desc">Minimum pixel distance before a drag operation starts.</span>
+                <span class="row-desc"
+                  >Minimum pixel distance before a drag operation starts.</span
+                >
               </div>
             </section>
           </div>
@@ -542,7 +568,10 @@
               {#if config.filter_mode === 'whitelist' && config.filter_list.length === 0}
                 <div class="whitelist-warning">
                   <span class="warning-icon">⚠</span>
-                  <span>Whitelist is active but no processes are listed. Glide will not work on any window.</span>
+                  <span
+                    >Whitelist is active but no processes are listed. Glide will
+                    not work on any window.</span
+                  >
                 </div>
               {/if}
             </section>
@@ -564,12 +593,16 @@
             <section class="card">
               <div class="row-item">
                 <span class="row-label">Current version</span>
-                <span class="about-value">{appVersion ? `v${appVersion}` : '—'}</span>
+                <span class="about-value"
+                  >{appVersion ? `v${appVersion}` : '—'}</span
+                >
               </div>
               {#if updateAvailable !== null}
                 <div class="row-item" style="margin-top: 7px;">
                   <span class="row-label">Latest version</span>
-                  <span class="about-value about-new">v{updateAvailable.version}</span>
+                  <span class="about-value about-new"
+                    >v{updateAvailable.version}</span
+                  >
                 </div>
                 <div class="update-action" style="margin-top: 10px;">
                   <button
@@ -583,12 +616,16 @@
               {:else if !updateCheckFailed}
                 <div class="row-item" style="margin-top: 7px;">
                   <span class="row-label">Latest version</span>
-                  <span class="about-value">{appVersion ? `v${appVersion}` : '—'}</span>
+                  <span class="about-value"
+                    >{appVersion ? `v${appVersion}` : '—'}</span
+                  >
                 </div>
                 <p class="up-to-date-text">You're up to date.</p>
               {/if}
               {#if updateCheckFailed}
-                <p class="error-text">Could not check for updates. Check your internet connection.</p>
+                <p class="error-text">
+                  Could not check for updates. Check your internet connection.
+                </p>
               {/if}
               {#if updateError}
                 <p class="error-text">{updateError}</p>
@@ -833,7 +870,6 @@
       0 7px 22px rgb(31 60 100 / 0.08);
   }
 
-
   .update-btn {
     flex-shrink: 0;
     padding: 5px 14px;
@@ -875,7 +911,6 @@
     font-size: 13px;
     line-height: 1;
   }
-
 
   kbd {
     display: inline-block;
