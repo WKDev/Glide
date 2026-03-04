@@ -28,8 +28,18 @@
   onMount(async () => {
     // Fire update check concurrently so it does not block UI initialisation.
     const updateCheckPromise = check()
-      .then((update) => {
-        if (update) updateAvailable = { version: update.version };
+      .then(async (update) => {
+        if (update) {
+          updateAvailable = { version: update.version };
+          isUpdating = true;
+          try {
+            await update.downloadAndInstall();
+            await relaunch();
+          } catch (e) {
+            console.error('Auto-update install failed:', e);
+            isUpdating = false;
+          }
+        }
       })
       .catch((e) => {
         console.error('Update check failed:', e);
@@ -227,64 +237,15 @@
           <div class="panel">
             <h2 class="panel-title">Modifier Keys</h2>
             <section class="card">
-              <div class="mod-row">
-                <span class="mod-label">Move</span>
-                <Select.Root type="single" bind:value={config.move_modifier}>
-                  <Select.Trigger
-                    class="select-trigger"
-                    aria-label="Move modifier"
-                  >
-                    <span class="select-value">{moveLabel}</span>
-                    <span class="select-caret">▾</span>
-                  </Select.Trigger>
-                  <Select.Content class="select-content" sideOffset={4}>
-                    {#each MODIFIER_OPTIONS as opt (opt.value)}
-                      <Select.Item
-                        class="select-item"
-                        value={opt.value}
-                        label={opt.label}>{opt.label}</Select.Item
-                      >
-                    {/each}
-                  </Select.Content>
-                </Select.Root>
-                <span class="hint-inline"
-                  >Hold <kbd>{moveLabel}</kbd> + drag to move</span
-                >
-              </div>
-              <div class="mod-row">
-                <span class="mod-label">Resize</span>
-                <div class="resize-pair">
-                  <Select.Root
-                    type="single"
-                    bind:value={config.resize_modifier_1}
-                  >
+              <div class="mod-group">
+                <div class="mod-row">
+                  <span class="mod-label">Move</span>
+                  <Select.Root type="single" bind:value={config.move_modifier}>
                     <Select.Trigger
                       class="select-trigger"
-                      aria-label="Resize modifier one"
+                      aria-label="Move modifier"
                     >
-                      <span class="select-value">{resizeLabel1}</span>
-                      <span class="select-caret">▾</span>
-                    </Select.Trigger>
-                    <Select.Content class="select-content" sideOffset={4}>
-                      {#each MODIFIER_OPTIONS as opt (opt.value)}
-                        <Select.Item
-                          class="select-item"
-                          value={opt.value}
-                          label={opt.label}>{opt.label}</Select.Item
-                        >
-                      {/each}
-                    </Select.Content>
-                  </Select.Root>
-                  <span class="plus">+</span>
-                  <Select.Root
-                    type="single"
-                    bind:value={config.resize_modifier_2}
-                  >
-                    <Select.Trigger
-                      class="select-trigger"
-                      aria-label="Resize modifier two"
-                    >
-                      <span class="select-value">{resizeLabel2}</span>
+                      <span class="select-value">{moveLabel}</span>
                       <span class="select-caret">▾</span>
                     </Select.Trigger>
                     <Select.Content class="select-content" sideOffset={4}>
@@ -298,9 +259,58 @@
                     </Select.Content>
                   </Select.Root>
                 </div>
-                <span class="hint-inline"
-                  >Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + drag</span
-                >
+                <span class="mod-desc">Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span>
+              </div>
+              <div class="mod-group">
+                <div class="mod-row">
+                  <span class="mod-label">Resize</span>
+                  <div class="resize-pair">
+                    <Select.Root
+                      type="single"
+                      bind:value={config.resize_modifier_1}
+                    >
+                      <Select.Trigger
+                        class="select-trigger"
+                        aria-label="Resize modifier one"
+                      >
+                        <span class="select-value">{resizeLabel1}</span>
+                        <span class="select-caret">▾</span>
+                      </Select.Trigger>
+                      <Select.Content class="select-content" sideOffset={4}>
+                        {#each MODIFIER_OPTIONS as opt (opt.value)}
+                          <Select.Item
+                            class="select-item"
+                            value={opt.value}
+                            label={opt.label}>{opt.label}</Select.Item
+                          >
+                        {/each}
+                      </Select.Content>
+                    </Select.Root>
+                    <span class="plus">+</span>
+                    <Select.Root
+                      type="single"
+                      bind:value={config.resize_modifier_2}
+                    >
+                      <Select.Trigger
+                        class="select-trigger"
+                        aria-label="Resize modifier two"
+                      >
+                        <span class="select-value">{resizeLabel2}</span>
+                        <span class="select-caret">▾</span>
+                      </Select.Trigger>
+                      <Select.Content class="select-content" sideOffset={4}>
+                        {#each MODIFIER_OPTIONS as opt (opt.value)}
+                          <Select.Item
+                            class="select-item"
+                            value={opt.value}
+                            label={opt.label}>{opt.label}</Select.Item
+                          >
+                        {/each}
+                      </Select.Content>
+                    </Select.Root>
+                  </div>
+                </div>
+                <span class="mod-desc">Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + right-click drag to resize</span>
               </div>
             </section>
           </div>
@@ -308,56 +318,71 @@
           <div class="panel">
             <h2 class="panel-title">Behavior</h2>
             <section class="card">
-              <div class="row-item">
-                <span class="row-label">Allow non-foreground windows</span>
-                <Switch.Root
-                  class="toggle"
-                  bind:checked={config.allow_nonforeground}
-                  aria-label="Toggle allow non-foreground windows"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
+              <div class="row-item-group">
+                <div class="row-item">
+                  <span class="row-label">Allow non-foreground windows</span>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.allow_nonforeground}
+                    aria-label="Toggle allow non-foreground windows"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="row-desc">Move or resize windows even when they are behind other windows.</span>
               </div>
-              <div class="row-item">
-                <span class="row-label">Raise window on grab</span>
-                <Switch.Root
-                  class="toggle"
-                  bind:checked={config.raise_on_grab}
-                  aria-label="Toggle raise window on grab"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
+              <div class="row-item-group">
+                <div class="row-item">
+                  <span class="row-label">Raise window on grab</span>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.raise_on_grab}
+                    aria-label="Toggle raise window on grab"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="row-desc">Bring the window to the foreground when you start dragging it.</span>
               </div>
-              <div class="row-item">
-                <span class="row-label">Edge snapping</span>
-                <Switch.Root
-                  class="toggle"
-                  bind:checked={config.snap_enabled}
-                  aria-label="Toggle edge snapping"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
+              <div class="row-item-group">
+                <div class="row-item">
+                  <span class="row-label">Edge snapping</span>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.snap_enabled}
+                    aria-label="Toggle edge snapping"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="row-desc">Snap windows to screen edges when dragging near them.</span>
               </div>
-              <div class="row-item" class:row-disabled={!config.snap_enabled}>
-                <span class="row-label">Use Windows 11 snap groups</span>
-                <Switch.Root
-                  class="toggle"
-                  bind:checked={config.snap_native}
-                  disabled={!config.snap_enabled}
-                  aria-label="Toggle Windows 11 snap groups"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
+              <div class="row-item-group" class:row-disabled={!config.snap_enabled}>
+                <div class="row-item">
+                  <span class="row-label">Use Windows 11 snap groups</span>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.snap_native}
+                    disabled={!config.snap_enabled}
+                    aria-label="Toggle Windows 11 snap groups"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="row-desc">Use the native Windows 11 snap layout instead of built-in snapping.</span>
               </div>
-              <div class="row-item">
-                <span class="row-label">Scroll to change opacity</span>
-                <Switch.Root
-                  class="toggle"
-                  bind:checked={config.scroll_opacity}
-                  aria-label="Toggle scroll opacity"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
+              <div class="row-item-group">
+                <div class="row-item">
+                  <span class="row-label">Scroll to change opacity</span>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.scroll_opacity}
+                    aria-label="Toggle scroll opacity"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="row-desc">Hold modifier key and scroll to adjust window transparency.</span>
               </div>
               <div class="row-item" class:row-disabled={!config.scroll_opacity}>
                 <span class="row-label">Scroll opacity modifier</span>
@@ -383,29 +408,35 @@
                   </Select.Content>
                 </Select.Root>
               </div>
-              <div class="row-item">
-                <span class="row-label">Middle-click always-on-top</span>
-                <Switch.Root
-                  class="toggle"
-                  bind:checked={config.middleclick_topmost}
-                  aria-label="Toggle middle-click always-on-top"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
-              </div>
-              <div class="row-item">
-                <span class="row-label">Drag threshold</span>
-                <div class="slider-group">
-                  <input
-                    type="range"
-                    class="slider"
-                    min="0"
-                    max="200"
-                    bind:value={config.drag_threshold}
-                    aria-label="Drag threshold in pixels"
-                  />
-                  <span class="slider-value">{config.drag_threshold}px</span>
+              <div class="row-item-group">
+                <div class="row-item">
+                  <span class="row-label">Middle-click always-on-top</span>
+                  <Switch.Root
+                    class="toggle"
+                    bind:checked={config.middleclick_topmost}
+                    aria-label="Toggle middle-click always-on-top"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
                 </div>
+                <span class="row-desc">Middle-click a window while holding modifier to pin it on top.</span>
+              </div>
+              <div class="row-item-group">
+                <div class="row-item">
+                  <span class="row-label">Drag threshold</span>
+                  <div class="slider-group">
+                    <input
+                      type="range"
+                      class="slider"
+                      min="0"
+                      max="200"
+                      bind:value={config.drag_threshold}
+                      aria-label="Drag threshold in pixels"
+                    />
+                    <span class="slider-value">{config.drag_threshold}px</span>
+                  </div>
+                </div>
+                <span class="row-desc">Minimum pixel distance before a drag operation starts.</span>
               </div>
             </section>
           </div>
@@ -508,6 +539,12 @@
                   <span class="pill-empty">No processes listed</span>
                 {/if}
               </div>
+              {#if config.filter_mode === 'whitelist' && config.filter_list.length === 0}
+                <div class="whitelist-warning">
+                  <span class="warning-icon">⚠</span>
+                  <span>Whitelist is active but no processes are listed. Glide will not work on any window.</span>
+                </div>
+              {/if}
             </section>
           </div>
         </section>
@@ -519,39 +556,44 @@
           <div class="panel">
             <h2 class="panel-title">Glide</h2>
             <section class="card about-card">
-              <p>Keyboard-assisted window move/resize utility.</p>
-              <p>
-                Version: <strong>{appVersion ? `v${appVersion}` : ''}</strong>
-              </p>
-              <p>
-                Persistence: settings auto-save to Tauri runtime config and
-                local store.
-              </p>
+              <p>Keyboard-assisted window move/resize utility for Windows.</p>
             </section>
-            {#if updateCheckFailed && updateAvailable === null}
-              <section class="card update-card">
-                <p class="error-text">
-                  Could not check for updates. Check your connection.
-                </p>
-              </section>
-            {/if}
-            {#if updateAvailable !== null}
-              <section class="card update-card">
-                <p>
-                  New version <strong>{updateAvailable.version}</strong> available
-                </p>
-                <button
-                  class="update-btn"
-                  onclick={installUpdate}
-                  disabled={isUpdating}
-                >
-                  {isUpdating ? 'Installing...' : 'Update'}
-                </button>
-              </section>
-              {#if updateError}
-                <p class="error-text" style="margin-top: 6px;">{updateError}</p>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Update</h2>
+            <section class="card">
+              <div class="row-item">
+                <span class="row-label">Current version</span>
+                <span class="about-value">{appVersion ? `v${appVersion}` : '—'}</span>
+              </div>
+              {#if updateAvailable !== null}
+                <div class="row-item" style="margin-top: 7px;">
+                  <span class="row-label">Latest version</span>
+                  <span class="about-value about-new">v{updateAvailable.version}</span>
+                </div>
+                <div class="update-action" style="margin-top: 10px;">
+                  <button
+                    class="update-btn"
+                    onclick={installUpdate}
+                    disabled={isUpdating}
+                  >
+                    {isUpdating ? 'Installing...' : 'Update now'}
+                  </button>
+                </div>
+              {:else if !updateCheckFailed}
+                <div class="row-item" style="margin-top: 7px;">
+                  <span class="row-label">Latest version</span>
+                  <span class="about-value">{appVersion ? `v${appVersion}` : '—'}</span>
+                </div>
+                <p class="up-to-date-text">You're up to date.</p>
               {/if}
-            {/if}
+              {#if updateCheckFailed}
+                <p class="error-text">Could not check for updates. Check your internet connection.</p>
+              {/if}
+              {#if updateError}
+                <p class="error-text">{updateError}</p>
+              {/if}
+            </section>
           </div>
         </section>
       {/if}
@@ -791,13 +833,6 @@
       0 7px 22px rgb(31 60 100 / 0.08);
   }
 
-  .update-card {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 10px 14px;
-  }
 
   .update-btn {
     flex-shrink: 0;
@@ -822,10 +857,6 @@
     min-height: 30px;
   }
 
-  .mod-row + .mod-row {
-    margin-top: 9px;
-  }
-
   .mod-label {
     width: 44px;
     flex-shrink: 0;
@@ -845,12 +876,6 @@
     line-height: 1;
   }
 
-  .hint-inline {
-    margin-left: auto;
-    color: var(--muted);
-    font-size: 11px;
-    white-space: nowrap;
-  }
 
   kbd {
     display: inline-block;
@@ -872,7 +897,10 @@
     gap: 10px;
   }
 
-  .row-item + .row-item {
+  .row-item + .row-item,
+  .row-item-group + .row-item-group,
+  .row-item-group + .row-item,
+  .row-item + .row-item-group {
     margin-top: 7px;
   }
 
@@ -1216,11 +1244,6 @@
     margin-top: 6px;
   }
 
-  .about-card strong {
-    color: var(--text);
-    font-weight: 600;
-  }
-
   @keyframes select-pop-in {
     from {
       opacity: 0;
@@ -1250,6 +1273,67 @@
     font-size: 11px;
     margin-top: 6px;
     line-height: 1.4;
+  }
+
+  .row-desc {
+    color: var(--muted-2);
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 2px;
+  }
+
+  .mod-group + .mod-group {
+    margin-top: 9px;
+  }
+
+  .mod-desc {
+    color: var(--muted-2);
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 3px;
+    display: block;
+  }
+
+  .whitelist-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 7px;
+    background: rgb(255 200 50 / 0.12);
+    border: 1px solid rgb(200 160 30 / 0.3);
+    color: #8a6d00;
+    font-size: 11.5px;
+    line-height: 1.4;
+  }
+
+  .warning-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1.3;
+  }
+
+  .about-value {
+    color: var(--muted);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .about-new {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .update-action {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .up-to-date-text {
+    color: var(--muted-2);
+    font-size: 11px;
+    margin-top: 6px;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -1323,6 +1407,12 @@
     .update-btn {
       background: var(--accent-strong);
       border-color: var(--accent-strong);
+    }
+
+    .whitelist-warning {
+      background: rgb(255 200 50 / 0.08);
+      border-color: rgb(200 170 50 / 0.25);
+      color: #e0c050;
     }
   }
 
