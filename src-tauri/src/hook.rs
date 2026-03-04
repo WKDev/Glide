@@ -64,8 +64,14 @@ static SCROLL_OPACITY_MASK: AtomicU32 = AtomicU32::new(MOD_ALT);
 /// 256 bits = 8 × AtomicU32, one bit per VK code (0x00–0xFF).
 /// Read by `mouse_hook_proc` / the worker to suppress grabs during keyboard shortcuts.
 static NON_MOD_PRESSED: [AtomicU32; 8] = [
-    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
-    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -233,7 +239,9 @@ fn poll_modifiers() -> u32 {
 /// Returns `true` when any non-modifier keyboard key is physically held down.
 /// Backed by `NON_MOD_PRESSED` bitset that `keyboard_hook_proc` maintains.
 fn any_non_modifier_key_down() -> bool {
-    NON_MOD_PRESSED.iter().any(|w| w.load(Ordering::Acquire) != 0)
+    NON_MOD_PRESSED
+        .iter()
+        .any(|w| w.load(Ordering::Acquire) != 0)
 }
 
 /// Set or clear a bit in `NON_MOD_PRESSED` for a non-modifier VK code.
@@ -458,7 +466,12 @@ fn is_move_modifier_held(mods: u32) -> bool {
 /// reading `GetWindowRect` every tick.  This makes us authoritative over
 /// the window position and immune to external actors (Snap, app WndProc)
 /// resetting it between our ticks.
-fn worker_handle_mouse_move(point: POINT, mods: u32, non_mod_key: bool, state: &mut Option<GrabState>) {
+fn worker_handle_mouse_move(
+    point: POINT,
+    mods: u32,
+    non_mod_key: bool,
+    state: &mut Option<GrabState>,
+) {
     if !HOOK_ENABLED.load(Ordering::Relaxed) {
         if state.is_some() {
             overlay::hide();
@@ -731,7 +744,12 @@ fn worker_loop(rx: Receiver<WorkerEvent>) {
                 // Drain to latest mouse-move to skip stale coordinates.
                 let (latest, pushed_back) = drain_to_latest_mouse_move(event, &rx);
                 pending = pushed_back;
-                if let WorkerEvent::MouseMove { point, mods, non_mod_key } = latest {
+                if let WorkerEvent::MouseMove {
+                    point,
+                    mods,
+                    non_mod_key,
+                } = latest
+                {
                     worker_handle_mouse_move(point, mods, non_mod_key, &mut state);
                 }
             }
@@ -948,7 +966,11 @@ unsafe extern "system" fn mouse_hook_proc(
             let opacity_mask = SCROLL_OPACITY_MASK.load(Ordering::Acquire);
             let feature_active = SCROLL_OPACITY_ACTIVE.load(Ordering::Relaxed);
 
-            if feature_active && opacity_mask != 0 && mods == opacity_mask && !any_non_modifier_key_down() {
+            if feature_active
+                && opacity_mask != 0
+                && mods == opacity_mask
+                && !any_non_modifier_key_down()
+            {
                 // Modifier held + feature on → swallow and send to worker.
                 let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
                 let delta = (mouse.mouseData >> 16) as i16;
@@ -972,7 +994,8 @@ unsafe extern "system" fn mouse_hook_proc(
             let move_mask = MOVE_MASK.load(Ordering::Acquire);
             let feature_active = MIDDLECLICK_TOPMOST_ACTIVE.load(Ordering::Relaxed);
 
-            if feature_active && move_mask != 0 && mods == move_mask && !any_non_modifier_key_down() {
+            if feature_active && move_mask != 0 && mods == move_mask && !any_non_modifier_key_down()
+            {
                 let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
                 if let Some(tx) = WORKER_TX.get() {
                     let _ = tx.try_send(WorkerEvent::MiddleClick {
@@ -1357,14 +1380,14 @@ mod tests {
     #[test]
     fn test_determine_mode_extra_modifier_rejected_move() {
         let config = AppConfig::default(); // move = Alt
-        // Alt + Ctrl — extra Ctrl bit rejects exact match for Move
+                                           // Alt + Ctrl — extra Ctrl bit rejects exact match for Move
         assert_eq!(determine_mode(MOD_ALT | MOD_CTRL, &config), None);
     }
 
     #[test]
     fn test_determine_mode_extra_modifier_rejected_resize() {
         let config = AppConfig::default(); // resize = Alt + Shift
-        // Alt + Shift + Ctrl — extra Ctrl bit rejects exact match for Resize
+                                           // Alt + Shift + Ctrl — extra Ctrl bit rejects exact match for Resize
         assert_eq!(
             determine_mode(MOD_ALT | MOD_SHIFT | MOD_CTRL, &config),
             None
@@ -1374,7 +1397,7 @@ mod tests {
     #[test]
     fn test_determine_mode_exact_move_and_resize() {
         let config = AppConfig::default(); // move = Alt, resize = Alt + Shift
-        // Exact Alt → Move
+                                           // Exact Alt → Move
         assert_eq!(determine_mode(MOD_ALT, &config), Some(DragMode::Move));
         // Exact Alt + Shift → Resize
         assert_eq!(
