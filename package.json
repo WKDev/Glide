@@ -1,6 +1,6 @@
 {
   "name": "glide",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Modifier key + mouse window move/resize utility for Windows",
   "type": "module",
   "author": "wkdev",
