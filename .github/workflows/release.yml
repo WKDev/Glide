@@ -94,8 +94,8 @@ jobs:
             'StoreLogo.png'
           ) | ForEach-Object { Copy-Item "src-tauri/icons/$_" "$stagingDir/Assets/$_" }
 
-          (Get-Content '.github/AppxManifest.xml' -Raw)
-            .Replace('{{PUBLISHER}}', $publisher)
+          (Get-Content '.github/AppxManifest.xml' -Raw) `
+            .Replace('{{PUBLISHER}}', $publisher) `
             .Replace('{{VERSION}}',   $msixVer) |
             Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
 
