@@ -60,6 +60,14 @@ static SCROLL_OPACITY_ACTIVE: AtomicBool = AtomicBool::new(true);
 static MIDDLECLICK_TOPMOST_ACTIVE: AtomicBool = AtomicBool::new(true);
 static SCROLL_OPACITY_MASK: AtomicU32 = AtomicU32::new(MOD_ALT);
 
+/// Bitset tracking currently-pressed non-modifier keys, updated by `keyboard_hook_proc`.
+/// 256 bits = 8 × AtomicU32, one bit per VK code (0x00–0xFF).
+/// Read by `mouse_hook_proc` / the worker to suppress grabs during keyboard shortcuts.
+static NON_MOD_PRESSED: [AtomicU32; 8] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMode {
     Move,
@@ -102,6 +110,8 @@ enum WorkerEvent {
     MouseMove {
         point: POINT,
         mods: u32,
+        /// `true` when any non-modifier key was physically held at capture time.
+        non_mod_key: bool,
     },
     MouseWheel {
         point: POINT,
@@ -156,7 +166,7 @@ fn is_virtual_key_down(vk: i32) -> bool {
 }
 
 /// Poll the physical keyboard state for all modifier keys.
-/// Used only for initial sync on startup.
+/// Updates `MODIFIER_STATE` as a side-effect.  Used for initial sync on startup.
 fn refresh_modifier_state_from_keyboard() -> u32 {
     let mut mods = 0u32;
 
@@ -187,6 +197,70 @@ fn refresh_modifier_state_from_keyboard() -> u32 {
 
     MODIFIER_STATE.store(mods, Ordering::Release);
     mods
+}
+
+/// Lightweight modifier poll for use inside hook callbacks.
+/// Returns the current bitmask without touching `MODIFIER_STATE`.
+/// This is the release-build-safe alternative to reading the atomic that
+/// `keyboard_hook_proc` maintains — see `mouse_hook_proc` doc comment.
+#[inline]
+fn poll_modifiers() -> u32 {
+    let mut mods = 0u32;
+    if is_virtual_key_down(VK_LMENU.0 as i32)
+        || is_virtual_key_down(VK_RMENU.0 as i32)
+        || is_virtual_key_down(VK_MENU.0 as i32)
+    {
+        mods |= MOD_ALT;
+    }
+    if is_virtual_key_down(VK_LCONTROL.0 as i32)
+        || is_virtual_key_down(VK_RCONTROL.0 as i32)
+        || is_virtual_key_down(VK_CONTROL.0 as i32)
+    {
+        mods |= MOD_CTRL;
+    }
+    if is_virtual_key_down(VK_LSHIFT.0 as i32)
+        || is_virtual_key_down(VK_RSHIFT.0 as i32)
+        || is_virtual_key_down(VK_SHIFT.0 as i32)
+    {
+        mods |= MOD_SHIFT;
+    }
+    if is_virtual_key_down(VK_LWIN.0 as i32) || is_virtual_key_down(VK_RWIN.0 as i32) {
+        mods |= MOD_WIN;
+    }
+    mods
+}
+
+/// Returns `true` when any non-modifier keyboard key is physically held down.
+/// Backed by `NON_MOD_PRESSED` bitset that `keyboard_hook_proc` maintains.
+fn any_non_modifier_key_down() -> bool {
+    NON_MOD_PRESSED.iter().any(|w| w.load(Ordering::Acquire) != 0)
+}
+
+/// Set or clear a bit in `NON_MOD_PRESSED` for a non-modifier VK code.
+/// Called from `keyboard_hook_proc` for every key-down / key-up event
+/// that is NOT a modifier key.
+#[inline]
+fn mark_non_mod_key(vk: u32, down: bool) {
+    if vk == 0 || vk > 255 {
+        return;
+    }
+    let word = (vk / 32) as usize;
+    let bit = 1u32 << (vk % 32);
+    if down {
+        NON_MOD_PRESSED[word].fetch_or(bit, Ordering::Release);
+    } else {
+        NON_MOD_PRESSED[word].fetch_and(!bit, Ordering::Release);
+    }
+}
+
+/// Flush the entire non-modifier bitset.  Called from the mouse hook when
+/// no modifier is held — acts as a periodic self-heal in case the keyboard
+/// hook is silently removed by Windows and stale bits accumulate.
+#[inline]
+fn clear_non_mod_keys() {
+    for w in &NON_MOD_PRESSED {
+        w.store(0, Ordering::Release);
+    }
 }
 
 /// Sync pre-computed config values so the hook thread can make decisions
@@ -226,20 +300,20 @@ fn process_allowed(config: &AppConfig, process_name: &str) -> bool {
     }
 }
 
-/// Inclusive (subset) match: all bits of the required mask must be present,
-/// but extra modifier bits are tolerated.  This prevents transient modifier
-/// flicker (e.g. a brief Ctrl press while Alt is held) from tearing down
-/// an active grab.
+/// Exact match: the pressed modifier bits must match the required mask precisely.
+/// No extra modifier bits are allowed.  Combined with the non-modifier key check
+/// in the caller, this ensures window manipulation only activates when the user
+/// is holding exactly the configured modifier keys and nothing else.
 fn determine_mode(mods: u32, config: &AppConfig) -> Option<DragMode> {
     // Check resize first — it requires strictly more modifiers than move.
     let resize_mask =
         modifier_to_mask(config.resize_modifier_1) | modifier_to_mask(config.resize_modifier_2);
-    if resize_mask != 0 && (mods & resize_mask) == resize_mask {
+    if resize_mask != 0 && mods == resize_mask {
         return Some(DragMode::Resize);
     }
 
     let move_mask = modifier_to_mask(config.move_modifier);
-    if move_mask != 0 && (mods & move_mask) == move_mask {
+    if move_mask != 0 && mods == move_mask {
         return Some(DragMode::Move);
     }
 
@@ -371,10 +445,10 @@ fn set_active_grab(active: bool) {
     ACTIVE_GRAB.store(active, Ordering::Relaxed);
 }
 
-/// Check if the modifier key(s) for "move" action are currently held.
+/// Check if the modifier key(s) for "move" action are currently held (exact match).
 fn is_move_modifier_held(mods: u32) -> bool {
     let move_mask = MOVE_MASK.load(Ordering::Acquire);
-    move_mask != 0 && (mods & move_mask) == move_mask
+    move_mask != 0 && mods == move_mask
 }
 
 /// Process a mouse-move event on the worker thread.
@@ -384,7 +458,7 @@ fn is_move_modifier_held(mods: u32) -> bool {
 /// reading `GetWindowRect` every tick.  This makes us authoritative over
 /// the window position and immune to external actors (Snap, app WndProc)
 /// resetting it between our ticks.
-fn worker_handle_mouse_move(point: POINT, mods: u32, state: &mut Option<GrabState>) {
+fn worker_handle_mouse_move(point: POINT, mods: u32, non_mod_key: bool, state: &mut Option<GrabState>) {
     if !HOOK_ENABLED.load(Ordering::Relaxed) {
         if state.is_some() {
             overlay::hide();
@@ -412,7 +486,14 @@ fn worker_handle_mouse_move(point: POINT, mods: u32, state: &mut Option<GrabStat
         return;
     }
 
-    let Some(desired_mode) = determine_mode(mods, &config) else {
+    // If a non-modifier key is held, treat as "no matching mode" so the grab
+    // is prevented or torn down — the user is performing a keyboard shortcut.
+    let desired_mode = if non_mod_key {
+        None
+    } else {
+        determine_mode(mods, &config)
+    };
+    let Some(desired_mode) = desired_mode else {
         // Grab ending — check for snap before clearing state.
         if let Some(old_grab) = state.take() {
             log::debug!("grab released: mods={:#x}", mods);
@@ -583,7 +664,7 @@ fn worker_handle_scroll(point: POINT, delta: i16, mods: u32) {
 
     // Only act when the scroll opacity modifier is held.
     let opacity_mask = SCROLL_OPACITY_MASK.load(Ordering::Acquire);
-    if opacity_mask == 0 || (mods & opacity_mask) != opacity_mask {
+    if opacity_mask == 0 || mods != opacity_mask {
         return;
     }
 
@@ -650,8 +731,8 @@ fn worker_loop(rx: Receiver<WorkerEvent>) {
                 // Drain to latest mouse-move to skip stale coordinates.
                 let (latest, pushed_back) = drain_to_latest_mouse_move(event, &rx);
                 pending = pushed_back;
-                if let WorkerEvent::MouseMove { point, mods } = latest {
-                    worker_handle_mouse_move(point, mods, &mut state);
+                if let WorkerEvent::MouseMove { point, mods, non_mod_key } = latest {
+                    worker_handle_mouse_move(point, mods, non_mod_key, &mut state);
                 }
             }
             WorkerEvent::MouseWheel { point, delta, mods } => {
@@ -705,13 +786,17 @@ unsafe extern "system" fn keyboard_hook_proc(
         // Using a unique dwExtraInfo marker is more precise than LLKHF_INJECTED, which
         // would also suppress legitimate synthetic input from third-party tools.
         if kb.dwExtraInfo != GLIDE_SYNTHETIC_EXTRA_INFO {
+            let msg = w_param.0 as u32;
             if let Some(mask) = key_to_mask(kb.vkCode) {
-                let msg = w_param.0 as u32;
                 if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
                     MODIFIER_STATE.fetch_or(mask, Ordering::Release);
                 } else {
                     MODIFIER_STATE.fetch_and(!mask, Ordering::Release);
                 }
+            } else {
+                // Non-modifier key — track in bitset for exact-match detection.
+                let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                mark_non_mod_key(kb.vkCode, is_down);
             }
         }
     }
@@ -790,7 +875,23 @@ fn apply_snap_native(hwnd: HWND, zone: snap::SnapZone) {
     }
 }
 
-/// Mouse hook — reads modifier snapshot and sends it with the event.
+/// Mouse hook — reads modifier state and sends it with the event.
+///
+/// ## Modifier polling strategy (GetAsyncKeyState)
+///
+/// We poll modifiers via `GetAsyncKeyState` (the `poll_modifiers()` helper)
+/// instead of reading the `MODIFIER_STATE` atomic that `keyboard_hook_proc`
+/// maintains.  This is intentional: Windows (Defender, anti-keylogger heuristics,
+/// or the hook-timeout watchdog) can silently remove `WH_KEYBOARD_LL` hooks from
+/// packaged / unsigned executables while leaving `WH_MOUSE_LL` intact.  When that
+/// happens, `MODIFIER_STATE` never updates and modifier+mouse gestures stop
+/// working — the symptom reported in release builds.
+///
+/// `GetAsyncKeyState` queries the physical key state directly from the OS input
+/// subsystem, so it works regardless of whether the keyboard hook is alive.
+///
+/// **To revert to the hook-driven approach**, replace every `poll_modifiers()`
+/// call in this function with `MODIFIER_STATE.load(Ordering::Acquire)`.
 ///
 /// AltSnap pattern: **always pass WM_MOUSEMOVE through** (CallNextHookEx).
 /// Swallowing causes OS mouse-tracking and DWM to lose context,
@@ -817,11 +918,23 @@ unsafe extern "system" fn mouse_hook_proc(
     match msg {
         WM_MOUSEMOVE => {
             let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
-            let mods = MODIFIER_STATE.load(Ordering::Acquire);
+            // Poll modifiers + non-modifier key state via GetAsyncKeyState.
+            // Immune to keyboard hook removal (same rationale as poll_modifiers).
+            let mods = poll_modifiers();
+            // Read non-modifier key state from the keyboard-hook bitset.
+            // When no modifier is held, flush the bitset to self-heal stale
+            // bits (e.g. if Windows silently removed the keyboard hook).
+            let non_mod_key = if mods != 0 {
+                any_non_modifier_key_down()
+            } else {
+                clear_non_mod_keys();
+                false
+            };
             if let Some(tx) = WORKER_TX.get() {
                 let _ = tx.try_send(WorkerEvent::MouseMove {
                     point: mouse.pt,
                     mods,
+                    non_mod_key,
                 });
             }
             // Always pass through — never swallow WM_MOUSEMOVE.
@@ -829,11 +942,13 @@ unsafe extern "system" fn mouse_hook_proc(
         }
 
         WM_MOUSEWHEEL => {
-            let mods = MODIFIER_STATE.load(Ordering::Acquire);
+            // CHANGED: poll via GetAsyncKeyState — immune to keyboard hook removal.
+            // Revert: `let mods = MODIFIER_STATE.load(Ordering::Acquire);`
+            let mods = poll_modifiers();
             let opacity_mask = SCROLL_OPACITY_MASK.load(Ordering::Acquire);
             let feature_active = SCROLL_OPACITY_ACTIVE.load(Ordering::Relaxed);
 
-            if feature_active && opacity_mask != 0 && (mods & opacity_mask) == opacity_mask {
+            if feature_active && opacity_mask != 0 && mods == opacity_mask && !any_non_modifier_key_down() {
                 // Modifier held + feature on → swallow and send to worker.
                 let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
                 let delta = (mouse.mouseData >> 16) as i16;
@@ -851,11 +966,13 @@ unsafe extern "system" fn mouse_hook_proc(
         }
 
         WM_MBUTTONDOWN => {
-            let mods = MODIFIER_STATE.load(Ordering::Acquire);
+            // CHANGED: poll via GetAsyncKeyState — immune to keyboard hook removal.
+            // Revert: `let mods = MODIFIER_STATE.load(Ordering::Acquire);`
+            let mods = poll_modifiers();
             let move_mask = MOVE_MASK.load(Ordering::Acquire);
             let feature_active = MIDDLECLICK_TOPMOST_ACTIVE.load(Ordering::Relaxed);
 
-            if feature_active && move_mask != 0 && (mods & move_mask) == move_mask {
+            if feature_active && move_mask != 0 && mods == move_mask && !any_non_modifier_key_down() {
                 let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
                 if let Some(tx) = WORKER_TX.get() {
                     let _ = tx.try_send(WorkerEvent::MiddleClick {
@@ -1215,10 +1332,10 @@ mod tests {
     }
 
     #[test]
-    fn test_determine_mode_all_modifiers_resize_priority() {
+    fn test_determine_mode_all_modifiers_no_match() {
         let config = AppConfig::default();
-        // All modifiers held — resize has priority
-        assert_eq!(determine_mode(0xF, &config), Some(DragMode::Resize));
+        // All modifiers held — exact match rejects extra modifiers
+        assert_eq!(determine_mode(0xF, &config), None);
     }
 
     #[test]
@@ -1235,6 +1352,37 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(determine_mode(MOD_CTRL, &config), Some(DragMode::Move));
+    }
+
+    #[test]
+    fn test_determine_mode_extra_modifier_rejected_move() {
+        let config = AppConfig::default(); // move = Alt
+        // Alt + Ctrl — extra Ctrl bit rejects exact match for Move
+        assert_eq!(determine_mode(MOD_ALT | MOD_CTRL, &config), None);
+    }
+
+    #[test]
+    fn test_determine_mode_extra_modifier_rejected_resize() {
+        let config = AppConfig::default(); // resize = Alt + Shift
+        // Alt + Shift + Ctrl — extra Ctrl bit rejects exact match for Resize
+        assert_eq!(
+            determine_mode(MOD_ALT | MOD_SHIFT | MOD_CTRL, &config),
+            None
+        );
+    }
+
+    #[test]
+    fn test_determine_mode_exact_move_and_resize() {
+        let config = AppConfig::default(); // move = Alt, resize = Alt + Shift
+        // Exact Alt → Move
+        assert_eq!(determine_mode(MOD_ALT, &config), Some(DragMode::Move));
+        // Exact Alt + Shift → Resize
+        assert_eq!(
+            determine_mode(MOD_ALT | MOD_SHIFT, &config),
+            Some(DragMode::Resize)
+        );
+        // Alt + Win → None (extra Win)
+        assert_eq!(determine_mode(MOD_ALT | MOD_WIN, &config), None);
     }
 
     // ===== Tests for determine_resize_direction =====
