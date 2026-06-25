@@ -237,77 +237,23 @@
           <div class="panel">
             <h2 class="panel-title">Modifier Keys</h2>
             <section class="card">
-              <div class="mod-group" class:row-disabled={!config.move_enabled}>
+              <div class="mod-group">
                 <div class="mod-row">
-                  <span class="mod-label">Move</span>
-                  <Select.Root type="single" bind:value={config.move_modifier}>
-                    <Select.Trigger
-                      class="select-trigger"
-                      aria-label="Move modifier"
-                    >
-                      <span class="select-value">{moveLabel}</span>
-                      <span class="select-caret">▾</span>
-                    </Select.Trigger>
-                    <Select.Content class="select-content" sideOffset={4}>
-                      {#each MODIFIER_OPTIONS as opt (opt.value)}
-                        <Select.Item
-                          class="select-item"
-                          value={opt.value}
-                          label={opt.label}>{opt.label}</Select.Item
-                        >
-                      {/each}
-                    </Select.Content>
-                  </Select.Root>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.move_enabled}
-                    aria-label="Toggle move feature"
+                  <div
+                    class="mod-main"
+                    class:row-disabled={!config.move_enabled}
                   >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="mod-desc"
-                  >Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span
-                >
-              </div>
-              <div
-                class="mod-group"
-                class:row-disabled={!config.resize_enabled}
-              >
-                <div class="mod-row">
-                  <span class="mod-label">Resize</span>
-                  <div class="resize-pair">
+                    <span class="mod-label">Move</span>
                     <Select.Root
                       type="single"
-                      bind:value={config.resize_modifier_1}
+                      bind:value={config.move_modifier}
+                      disabled={!config.move_enabled}
                     >
                       <Select.Trigger
                         class="select-trigger"
-                        aria-label="Resize modifier one"
+                        aria-label="Move modifier"
                       >
-                        <span class="select-value">{resizeLabel1}</span>
-                        <span class="select-caret">▾</span>
-                      </Select.Trigger>
-                      <Select.Content class="select-content" sideOffset={4}>
-                        {#each MODIFIER_OPTIONS as opt (opt.value)}
-                          <Select.Item
-                            class="select-item"
-                            value={opt.value}
-                            label={opt.label}>{opt.label}</Select.Item
-                          >
-                        {/each}
-                      </Select.Content>
-                    </Select.Root>
-                    <span class="plus">+</span>
-                    <Select.Root
-                      type="single"
-                      bind:value={config.resize_modifier_2}
-                    >
-                      <Select.Trigger
-                        class="select-trigger"
-                        aria-label="Resize modifier two"
-                      >
-                        <span class="select-value">{resizeLabel2}</span>
+                        <span class="select-value">{moveLabel}</span>
                         <span class="select-caret">▾</span>
                       </Select.Trigger>
                       <Select.Content class="select-content" sideOffset={4}>
@@ -323,13 +269,82 @@
                   </div>
                   <Switch.Root
                     class="toggle"
+                    bind:checked={config.move_enabled}
+                    aria-label="Toggle move feature"
+                  >
+                    <Switch.Thumb class="thumb" />
+                  </Switch.Root>
+                </div>
+                <span class="mod-desc" class:row-disabled={!config.move_enabled}
+                  >Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span
+                >
+              </div>
+              <div class="mod-group">
+                <div class="mod-row">
+                  <div
+                    class="mod-main"
+                    class:row-disabled={!config.resize_enabled}
+                  >
+                    <span class="mod-label">Resize</span>
+                    <div class="resize-pair">
+                      <Select.Root
+                        type="single"
+                        bind:value={config.resize_modifier_1}
+                        disabled={!config.resize_enabled}
+                      >
+                        <Select.Trigger
+                          class="select-trigger"
+                          aria-label="Resize modifier one"
+                        >
+                          <span class="select-value">{resizeLabel1}</span>
+                          <span class="select-caret">▾</span>
+                        </Select.Trigger>
+                        <Select.Content class="select-content" sideOffset={4}>
+                          {#each MODIFIER_OPTIONS as opt (opt.value)}
+                            <Select.Item
+                              class="select-item"
+                              value={opt.value}
+                              label={opt.label}>{opt.label}</Select.Item
+                            >
+                          {/each}
+                        </Select.Content>
+                      </Select.Root>
+                      <span class="plus">+</span>
+                      <Select.Root
+                        type="single"
+                        bind:value={config.resize_modifier_2}
+                        disabled={!config.resize_enabled}
+                      >
+                        <Select.Trigger
+                          class="select-trigger"
+                          aria-label="Resize modifier two"
+                        >
+                          <span class="select-value">{resizeLabel2}</span>
+                          <span class="select-caret">▾</span>
+                        </Select.Trigger>
+                        <Select.Content class="select-content" sideOffset={4}>
+                          {#each MODIFIER_OPTIONS as opt (opt.value)}
+                            <Select.Item
+                              class="select-item"
+                              value={opt.value}
+                              label={opt.label}>{opt.label}</Select.Item
+                            >
+                          {/each}
+                        </Select.Content>
+                      </Select.Root>
+                    </div>
+                  </div>
+                  <Switch.Root
+                    class="toggle"
                     bind:checked={config.resize_enabled}
                     aria-label="Toggle resize feature"
                   >
                     <Switch.Thumb class="thumb" />
                   </Switch.Root>
                 </div>
-                <span class="mod-desc"
+                <span
+                  class="mod-desc"
+                  class:row-disabled={!config.resize_enabled}
                   >Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + right-click
                   drag to resize</span
                 >
@@ -944,6 +959,15 @@
     align-items: center;
     gap: 10px;
     min-height: 30px;
+  }
+
+  /* Holds the label + modifier selects. Dimmed/disabled when the feature is
+     off, while the enable toggle stays a sibling — so it remains clickable to
+     turn the feature back on. */
+  .mod-main {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
 
   .mod-label {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-25
+
+### Fixed
+
+- Move/Resize enable toggles became unclickable once turned off — the toggle sat inside its own `pointer-events: none` disabled container, so the feature could not be re-enabled. The toggle is now a sibling of the dimmed controls and stays interactive.
+
 ## [0.2.2] - 2026-03-05
 
 ### Added
