@@ -24,7 +24,8 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Glide</DisplayName>
+    <!-- Must match the name reserved in Partner Center. -->
+    <DisplayName>Glide - Window Move &amp; Resize</DisplayName>
     <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>

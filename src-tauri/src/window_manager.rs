@@ -330,11 +330,7 @@ pub fn is_valid_target(hwnd: HWND) -> bool {
     }
 
     let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
-    if style & WS_CHILD.0 != 0 {
-        return false;
-    }
-
-    true
+    style & WS_CHILD.0 == 0
 }
 
 unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
