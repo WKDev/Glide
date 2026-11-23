@@ -67,6 +67,7 @@
   let supporter = $state<string | null>(null);
   let supportPrompt = $state(false);
   let supportCode = $state('');
+  let supportEmail = $state('');
   let redeeming = $state(false);
   let redeemError = $state<string | null>(null);
   let linkError = $state<string | null>(null);
@@ -336,14 +337,16 @@
 
   async function redeemCode(event: globalThis.SubmitEvent) {
     event.preventDefault();
-    if (redeeming || !supportCode.trim()) return;
+    if (redeeming || !supportCode.trim() || !supportEmail.trim()) return;
     redeeming = true;
     redeemError = null;
     try {
       supporter = await invoke<string>('redeem_supporter_code', {
         code: supportCode,
+        email: supportEmail,
       });
       supportCode = '';
+      supportEmail = '';
     } catch (error) {
       redeemError =
         typeof error === 'string' ? error : 'Could not check the code.';
@@ -948,17 +951,28 @@
                   >Supporter code</label
                 >
                 <span class="row-desc"
-                  >Supporters get a code from the developer. Enter it to show
-                  your supporter badge.</span
+                  >Supporters get a code from the developer. Enter it with the
+                  email address it was issued to.</span
                 >
               </div>
+              <input
+                class="text-input email-input"
+                type="email"
+                bind:value={supportEmail}
+                placeholder="Email address"
+                aria-label="Email address the code was issued to"
+                autocomplete="email"
+                spellcheck="false"
+                aria-invalid={redeemError ? 'true' : undefined}
+                aria-describedby={redeemError ? 'code-error' : undefined}
+              />
               <div class="code-field">
                 <input
                   id="supporter-code"
                   class="text-input"
                   bind:this={codeInput}
                   bind:value={supportCode}
-                  placeholder="GLIDE1-…"
+                  placeholder="GLIDE2-…"
                   spellcheck="false"
                   autocomplete="off"
                   aria-invalid={redeemError ? 'true' : undefined}
@@ -967,7 +981,9 @@
                 <button
                   type="submit"
                   class="button"
-                  disabled={redeeming || !supportCode.trim()}
+                  disabled={redeeming ||
+                    !supportCode.trim() ||
+                    !supportEmail.trim()}
                 >
                   {redeeming ? 'Checking…' : 'Redeem'}
                 </button>
@@ -1929,6 +1945,11 @@
 
   .code-row {
     flex-wrap: wrap;
+  }
+
+  .email-input {
+    flex: none;
+    width: 100%;
   }
 
   .code-field {

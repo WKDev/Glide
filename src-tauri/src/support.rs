@@ -1,21 +1,27 @@
 //! Supporter codes and the startup donation prompt.
 //!
-//! A supporter code is `GLIDE1-<name>.<signature>`, both parts base64url
-//! without padding. The signature is Ed25519 over `SIGNING_CONTEXT + name`,
-//! made with a private key kept outside this repository
-//! (`cargo run --example supporter_code -- issue <key-file> "<name>"`).
-//! The app only carries the public key, so codes verify offline.
+//! A supporter code is `GLIDE2-<name>.<signature>`, both parts base64url
+//! without padding. The signature is Ed25519 over
+//! `SIGNING_CONTEXT + name + "\n" + sha256(email)`, so a code only works
+//! together with the supporter's email: sharing a code publicly means sharing
+//! that email too. Codes are made with a private key kept outside this
+//! repository (`cargo run --example supporter_code -- issue ...`). The app
+//! carries only the public key and verifies offline; it stores the email's
+//! hash, never the address.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri_plugin_store::StoreExt;
 
-pub const CODE_PREFIX: &str = "GLIDE1-";
+pub const CODE_PREFIX: &str = "GLIDE2-";
 pub const MAX_NAME_CHARS: usize = 40;
-const SIGNING_CONTEXT: &[u8] = b"glide-supporter-v1:";
+const SIGNING_CONTEXT: &[u8] = b"glide-supporter-v2:";
+/// Characters of the signature used as a code's public ID.
+const CODE_ID_CHARS: usize = 12;
 const STORE_KEY: &str = "support";
 /// "Not now" hides the startup prompt for this long.
 const SNOOZE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -26,9 +32,36 @@ const PUBLIC_KEY: [u8; 32] = [
     27, 155, 212, 126, 0, 218, 97, 245, 74, 56, 160,
 ];
 
+/// IDs of codes found shared publicly (see `supporters.csv` beside the key).
+/// A listed code stops working once users install the update carrying it.
+const REVOKED_CODE_IDS: &[&str] = &[];
+
+/// Hex SHA-256 of the email, trimmed and lowercased.
+pub fn email_hash(email: &str) -> String {
+    Sha256::digest(email.trim().to_lowercase().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Loose shape check so typos fail before signing or verifying.
+pub fn looks_like_email(email: &str) -> bool {
+    let email = email.trim();
+    email
+        .split_once('@')
+        .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.'))
+        && !email.contains(char::is_whitespace)
+}
+
 /// The bytes a supporter code signs.
-pub fn signed_message(name: &str) -> Vec<u8> {
-    [SIGNING_CONTEXT, name.as_bytes()].concat()
+pub fn signed_message(name: &str, email_hash: &str) -> Vec<u8> {
+    [
+        SIGNING_CONTEXT,
+        name.as_bytes(),
+        b"\n",
+        email_hash.as_bytes(),
+    ]
+    .concat()
 }
 
 /// Build a code from a name and its signature.
@@ -40,29 +73,43 @@ pub fn encode_code(name: &str, signature: &[u8; 64]) -> String {
     )
 }
 
-/// Return the supporter name when `code` carries a valid signature.
-pub fn verify_code_with(key: &VerifyingKey, code: &str) -> Option<String> {
-    let body = code.trim().strip_prefix(CODE_PREFIX)?;
-    let (name, signature) = body.split_once('.')?;
+/// Short public ID of a code, recorded at issue time and used to revoke it.
+pub fn code_id(code: &str) -> Option<String> {
+    let (_, signature) = code.trim().strip_prefix(CODE_PREFIX)?.split_once('.')?;
+    signature.get(..CODE_ID_CHARS).map(str::to_owned)
+}
+
+/// Return the supporter name when `code` is validly signed for this email hash.
+pub fn verify_code_with(key: &VerifyingKey, code: &str, email_hash: &str) -> Option<String> {
+    let (name, signature) = code.trim().strip_prefix(CODE_PREFIX)?.split_once('.')?;
     let name = String::from_utf8(URL_SAFE_NO_PAD.decode(name).ok()?).ok()?;
     let signature: [u8; 64] = URL_SAFE_NO_PAD.decode(signature).ok()?.try_into().ok()?;
     if name.trim().is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return None;
     }
-    key.verify(&signed_message(&name), &Signature::from_bytes(&signature))
-        .ok()?;
+    key.verify(
+        &signed_message(&name, email_hash),
+        &Signature::from_bytes(&signature),
+    )
+    .ok()?;
     Some(name)
 }
 
-pub fn verify_code(code: &str) -> Option<String> {
+/// Verify against Glide's key and the revocation list.
+pub fn verify_code(code: &str, email_hash: &str) -> Option<String> {
+    if code_id(code).is_some_and(|id| REVOKED_CODE_IDS.contains(&id.as_str())) {
+        return None;
+    }
     let key = VerifyingKey::from_bytes(&PUBLIC_KEY).ok()?;
-    verify_code_with(&key, code)
+    verify_code_with(&key, code, email_hash)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SupportState {
     #[serde(default)]
     code: Option<String>,
+    #[serde(default)]
+    email_hash: Option<String>,
     /// The user chose a donation link from the prompt; stop asking.
     #[serde(default)]
     decided: bool,
@@ -109,11 +156,10 @@ fn status_of(state: &SupportState) -> SupportStatus {
 }
 
 fn status_with(state: &SupportState, codes_enabled: bool) -> SupportStatus {
-    let supporter = state
-        .code
-        .as_deref()
-        .filter(|_| codes_enabled)
-        .and_then(verify_code);
+    let supporter = match (&state.code, &state.email_hash) {
+        (Some(code), Some(hash)) if codes_enabled => verify_code(code, hash),
+        _ => None,
+    };
     let prompt = supporter.is_none() && !state.decided && now_secs() >= state.snooze_until;
     SupportStatus { supporter, prompt }
 }
@@ -129,14 +175,24 @@ pub fn get_support_status(app: tauri::AppHandle) -> SupportStatus {
 }
 
 #[tauri::command]
-pub fn redeem_supporter_code(app: tauri::AppHandle, code: String) -> Result<String, String> {
+pub fn redeem_supporter_code(
+    app: tauri::AppHandle,
+    code: String,
+    email: String,
+) -> Result<String, String> {
     if !CODES_ENABLED {
         return Err("Supporter codes aren't available in the Microsoft Store version.".into());
     }
-    let name =
-        verify_code(&code).ok_or("This code isn't valid. Check that you copied all of it.")?;
+    if !looks_like_email(&email) {
+        return Err("Enter the email address the code was issued to.".into());
+    }
+    let hash = email_hash(&email);
+    let name = verify_code(&code, &hash).ok_or(
+        "This code doesn't match that email. Check both against the message you received.",
+    )?;
     let mut state = load(&app);
     state.code = Some(code.trim().to_owned());
+    state.email_hash = Some(hash);
     save(&app, &state).map_err(|_| "Could not save the code. Try again.".to_owned())?;
     Ok(name)
 }
@@ -200,44 +256,83 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
+    const EMAIL: &str = "ada@example.com";
+
     fn test_key() -> SigningKey {
         SigningKey::from_bytes(&[7; 32])
     }
 
-    fn issue(key: &SigningKey, name: &str) -> String {
-        encode_code(name, &key.sign(&signed_message(name)).to_bytes())
+    fn issue(key: &SigningKey, name: &str, email: &str) -> String {
+        let signature = key.sign(&signed_message(name, &email_hash(email)));
+        encode_code(name, &signature.to_bytes())
     }
 
     #[test]
-    fn valid_code_returns_name() {
+    fn valid_code_returns_name_for_its_email() {
         let key = test_key();
-        let code = issue(&key, "Ada Lovelace");
+        let code = issue(&key, "Ada Lovelace", EMAIL);
+        // Email matching ignores case and surrounding space.
         assert_eq!(
-            verify_code_with(&key.verifying_key(), &format!("  {code}\n")),
+            verify_code_with(
+                &key.verifying_key(),
+                &format!("  {code}\n"),
+                &email_hash(" ADA@Example.com ")
+            ),
             Some("Ada Lovelace".to_owned())
+        );
+    }
+
+    #[test]
+    fn code_fails_with_another_email() {
+        let key = test_key();
+        let code = issue(&key, "Ada", EMAIL);
+        assert_eq!(
+            verify_code_with(&key.verifying_key(), &code, &email_hash("bob@example.com")),
+            None
         );
     }
 
     #[test]
     fn tampered_or_foreign_codes_fail() {
         let key = test_key();
-        let code = issue(&key, "Ada");
+        let code = issue(&key, "Ada", EMAIL);
+        let hash = email_hash(EMAIL);
         let forged = code.replace(
             &URL_SAFE_NO_PAD.encode("Ada"),
             &URL_SAFE_NO_PAD.encode("Bob"),
         );
-        assert_eq!(verify_code_with(&key.verifying_key(), &forged), None);
+        assert_eq!(verify_code_with(&key.verifying_key(), &forged, &hash), None);
         let other = SigningKey::from_bytes(&[9; 32]);
-        assert_eq!(verify_code_with(&other.verifying_key(), &code), None);
-        assert_eq!(verify_code_with(&key.verifying_key(), "GLIDE1-abc"), None);
-        assert_eq!(verify_code_with(&key.verifying_key(), ""), None);
+        assert_eq!(verify_code_with(&other.verifying_key(), &code, &hash), None);
+        assert_eq!(
+            verify_code_with(&key.verifying_key(), "GLIDE2-abc", &hash),
+            None
+        );
+        assert_eq!(verify_code_with(&key.verifying_key(), "", &hash), None);
+    }
+
+    #[test]
+    fn code_id_is_a_stable_signature_prefix() {
+        let code = issue(&test_key(), "Ada", EMAIL);
+        let id = code_id(&code).expect("id");
+        assert_eq!(id.len(), CODE_ID_CHARS);
+        assert!(code.split_once('.').unwrap().1.starts_with(&id));
+        assert_eq!(code_id(&format!(" {code} ")), Some(id));
+    }
+
+    #[test]
+    fn email_shape_check() {
+        assert!(looks_like_email(" ada@example.com "));
+        assert!(!looks_like_email("ada@example"));
+        assert!(!looks_like_email("@example.com"));
+        assert!(!looks_like_email("ada lovelace@example.com"));
     }
 
     #[test]
     fn store_builds_ignore_supporter_codes() {
-        let key = SigningKey::from_bytes(&[7; 32]);
         let state = SupportState {
-            code: Some(issue(&key, "Ada")),
+            code: Some(issue(&test_key(), "Ada", EMAIL)),
+            email_hash: Some(email_hash(EMAIL)),
             ..SupportState::default()
         };
         let status = status_with(&state, false);
