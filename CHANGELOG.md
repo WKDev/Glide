@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
+### Added
+
+- Move and Resize accept a combination of one to three modifier keys (Alt, Ctrl, Shift, Win) and fire only on that exact combination. Settings from 0.2 carry over.
+- Each gesture can start with a click-and-drag or just by moving the mouse past the drag threshold, with no click.
+- Redesigned settings window in the Windows 11 style: keycap pickers that light up as you hold keys, conflict warnings, and Gestures, Behavior, Apps, and About pages.
+- About shows the author and source code links and offers optional donations through GitHub Sponsors and Buy Me a Coffee. A startup prompt appears at launch until you choose a donation link; "Not now" hides it for 30 days.
+- GitHub builds accept supporter codes, tied to the supporter's email, which show a thank-you card and badge. Microsoft Store builds do not accept supporter codes, so donations there give nothing in return.
+
 ### Changed
 
 - Window move and resize require their configured modifiers and mouse button.
