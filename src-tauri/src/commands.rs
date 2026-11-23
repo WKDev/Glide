@@ -21,39 +21,47 @@ pub fn get_config(state: State<'_, AppState>) -> AppConfig {
 pub fn set_config(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    config: AppConfig,
+    mut config: AppConfig,
 ) -> Result<(), String> {
-    // Server-side bounds validation to guard against out-of-range IPC values.
-    if config.snap_threshold < 0 {
-        return Err("snap_threshold must be non-negative".to_string());
-    }
-    if config.snap_threshold > 500 {
-        return Err("snap_threshold must not exceed 500".to_string());
-    }
-    if config.drag_threshold < 0 {
-        return Err("drag_threshold must be non-negative".to_string());
-    }
-    if config.drag_threshold > 500 {
-        return Err("drag_threshold must not exceed 500".to_string());
-    }
+    validate_config(&config)?;
+    let mut current = state.config.lock();
+    // The tray owns this flag. A settings window can have an older snapshot.
+    config.enabled = current.enabled;
+    persist_config(&app, &config)?;
+    *current = config;
+    Ok(())
+}
 
-    // Update shared state
-    *state.config.lock() = config.clone();
+fn validate_config(config: &AppConfig) -> Result<(), String> {
+    for (name, value) in [
+        ("snap_threshold", config.snap_threshold),
+        ("drag_threshold", config.drag_threshold),
+    ] {
+        if value < 0 {
+            return Err(format!("{name} must be non-negative"));
+        }
+        if value > 500 {
+            return Err(format!("{name} must not exceed 500"));
+        }
+    }
+    Ok(())
+}
 
-    // Update hook enabled state
-    hook::set_enabled(config.enabled);
-
-    // Propagate config to hook thread
-    hook::update_config(state.config.clone());
-
-    // Persist to store
+fn persist_config(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
     let store = app.store("config.json").map_err(|e| e.to_string())?;
+    let previous = store.get("config");
     store.set(
         "config",
-        serde_json::to_value(&config).map_err(|e| e.to_string())?,
+        serde_json::to_value(config).map_err(|e| e.to_string())?,
     );
-    store.save().map_err(|e| e.to_string())?;
-
+    if let Err(error) = store.save() {
+        if let Some(previous) = previous {
+            store.set("config", previous);
+        } else {
+            store.delete("config");
+        }
+        return Err(error.to_string());
+    }
     Ok(())
 }
 
@@ -62,47 +70,69 @@ pub fn get_running_processes() -> Vec<String> {
     window_manager::get_running_process_names()
 }
 
+#[derive(serde::Serialize)]
+pub struct AppStatus {
+    hook_ready: bool,
+    store_build: bool,
+}
+
 #[tauri::command]
-pub fn set_hook_enabled(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
-    state.config.lock().enabled = enabled;
-    hook::set_enabled(enabled);
+pub fn get_app_status() -> AppStatus {
+    AppStatus {
+        hook_ready: hook::is_ready(),
+        store_build: crate::STORE_BUILD,
+    }
+}
 
-    // Persist the enabled state so it survives restarts.
-    let config = state.config.lock().clone();
-    let store = app.store("config.json").map_err(|e| e.to_string())?;
-    store.set(
-        "config",
-        serde_json::to_value(&config).map_err(|e| e.to_string())?,
-    );
-    store.save().map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn store_autostart(enabled: Option<bool>) -> Result<bool, String> {
+    if !crate::STORE_BUILD {
+        return Err("Windows startup tasks require the Store package.".into());
+    }
 
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        use windows::core::HSTRING;
+        use windows::ApplicationModel::{StartupTask, StartupTaskState};
+        use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(|e| e.to_string())?;
+        let result = (|| {
+            let task = StartupTask::GetAsync(&HSTRING::from("GlideStartup"))?.get()?;
+            let status = match enabled {
+                Some(true) => task.RequestEnableAsync()?.get()?,
+                Some(false) => {
+                    task.Disable()?;
+                    task.State()?
+                }
+                None => task.State()?,
+            };
+            Ok(matches!(
+                status,
+                StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy
+            ))
+        })();
+        unsafe { RoUninitialize() };
+        result.map_err(|e: windows::core::Error| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub fn toggle_hook(app: &tauri::AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    let mut current = state.config.lock();
+    let mut config = current.clone();
+    config.enabled = !config.enabled;
+    persist_config(app, &config)?;
+    *current = config;
+    hook::set_enabled(current.enabled);
+    Ok(current.enabled)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
 
-    // Mirror the validation logic so it can be unit-tested without a live Tauri runtime.
-    fn validate_config(config: &AppConfig) -> Result<(), String> {
-        if config.snap_threshold < 0 {
-            return Err("snap_threshold must be non-negative".to_string());
-        }
-        if config.snap_threshold > 500 {
-            return Err("snap_threshold must not exceed 500".to_string());
-        }
-        if config.drag_threshold < 0 {
-            return Err("drag_threshold must be non-negative".to_string());
-        }
-        if config.drag_threshold > 500 {
-            return Err("drag_threshold must not exceed 500".to_string());
-        }
-        Ok(())
-    }
+    use super::validate_config;
 
     #[test]
     fn test_snap_threshold_lower_bound() {

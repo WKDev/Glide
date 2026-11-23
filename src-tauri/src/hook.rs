@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
@@ -14,7 +15,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_KEYDOWN, WM_MOUSEMOVE, WM_QUIT, WM_SYSKEYDOWN,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN,
 };
 
 use crate::config::{AppConfig, FilterMode, ModifierKey, ResizeMode};
@@ -31,7 +33,7 @@ const WORKER_QUEUE_SIZE: usize = 1024;
 
 /// Marker stored in `dwExtraInfo` of every INPUT we synthesise via SendInput.
 /// The keyboard hook uses this to skip our own injected Win-key events so they
-/// do not pollute `MODIFIER_STATE` and accidentally start a new grab.
+/// do not cancel an active drag.
 const GLIDE_SYNTHETIC_EXTRA_INFO: usize = 0x474C_4944; // b'G','L','I','D'
 /// Mouse message constants not in the windows crate import set.
 const WM_MOUSEWHEEL: u32 = 0x020A;
@@ -41,23 +43,23 @@ const OPACITY_STEP: i32 = 15;
 /// Minimum opacity — still slightly visible.
 const OPACITY_MIN: u8 = 20;
 
-static MODIFIER_STATE: AtomicU32 = AtomicU32::new(0);
 static HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
-static ACTIVE_GRAB: AtomicBool = AtomicBool::new(false);
+static HOOK_READY: AtomicBool = AtomicBool::new(false);
 static SHARED_CONFIG: OnceLock<Arc<Mutex<AppConfig>>> = OnceLock::new();
-static WORKER_TX: OnceLock<SyncSender<WorkerEvent>> = OnceLock::new();
-/// Thread ID of the hook thread — used by `shutdown()` to post WM_QUIT for graceful teardown.
+static WORKER_TX: OnceLock<Sender<WorkerEvent>> = OnceLock::new();
+static QUEUED_INPUT: AtomicUsize = AtomicUsize::new(0);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Pre-computed modifier masks for the hook thread to decide swallowing
-/// synchronously, without waiting for the worker.
-static MOVE_MASK: AtomicU32 = AtomicU32::new(MOD_ALT);
-static RESIZE_MASK: AtomicU32 = AtomicU32::new(MOD_ALT | MOD_SHIFT);
+#[derive(Clone, Copy)]
+struct CapturedButton {
+    mode: DragMode,
+    modifiers: u32,
+    dragging: bool,
+}
 
-/// Feature flags — readable from the hook thread without touching the config mutex.
-static SCROLL_OPACITY_ACTIVE: AtomicBool = AtomicBool::new(true);
-
-static SCROLL_OPACITY_MASK: AtomicU32 = AtomicU32::new(MOD_ALT);
+thread_local! {
+    static CAPTURED_BUTTON: Cell<Option<CapturedButton>> = const { Cell::new(None) };
+}
 
 /// Bitset tracking currently-pressed non-modifier keys, updated by `keyboard_hook_proc`.
 /// 256 bits = 8 × AtomicU32, one bit per VK code (0x00–0xFF).
@@ -109,22 +111,30 @@ struct GrabState {
     committed: bool,
 }
 
-/// Worker event carrying the modifier snapshot from the hook thread.
-#[derive(Clone, Copy)]
 enum WorkerEvent {
-    MouseMove {
-        point: POINT,
-        mods: u32,
-        /// `true` when any non-modifier key was physically held at capture time.
-        non_mod_key: bool,
-    },
-    MouseWheel {
-        point: POINT,
-        delta: i16,
-        mods: u32,
-    },
-    /// Sent by the hook thread to signal the worker to exit cleanly.
+    Start(POINT, DragMode, usize),
+    MouseMove(POINT),
+    Finish,
+    Cancel,
+    MouseWheel(i16, usize),
     Shutdown,
+}
+
+fn send_event(event: WorkerEvent) -> bool {
+    WORKER_TX.get().is_some_and(|tx| tx.send(event).is_ok())
+}
+
+// Bound motion and wheel backlog while preserving ordered gesture transitions.
+fn queue_input(event: WorkerEvent) -> bool {
+    if QUEUED_INPUT.load(Ordering::Relaxed) >= WORKER_QUEUE_SIZE {
+        return false;
+    }
+    QUEUED_INPUT.fetch_add(1, Ordering::Relaxed);
+    if send_event(event) {
+        return true;
+    }
+    QUEUED_INPUT.fetch_sub(1, Ordering::Relaxed);
+    false
 }
 
 fn current_config() -> Option<AppConfig> {
@@ -166,45 +176,6 @@ fn is_virtual_key_down(vk: i32) -> bool {
     (unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000) != 0
 }
 
-/// Poll the physical keyboard state for all modifier keys.
-/// Updates `MODIFIER_STATE` as a side-effect.  Used for initial sync on startup.
-fn refresh_modifier_state_from_keyboard() -> u32 {
-    let mut mods = 0u32;
-
-    if is_virtual_key_down(VK_LMENU.0 as i32)
-        || is_virtual_key_down(VK_RMENU.0 as i32)
-        || is_virtual_key_down(VK_MENU.0 as i32)
-    {
-        mods |= MOD_ALT;
-    }
-
-    if is_virtual_key_down(VK_LCONTROL.0 as i32)
-        || is_virtual_key_down(VK_RCONTROL.0 as i32)
-        || is_virtual_key_down(VK_CONTROL.0 as i32)
-    {
-        mods |= MOD_CTRL;
-    }
-
-    if is_virtual_key_down(VK_LSHIFT.0 as i32)
-        || is_virtual_key_down(VK_RSHIFT.0 as i32)
-        || is_virtual_key_down(VK_SHIFT.0 as i32)
-    {
-        mods |= MOD_SHIFT;
-    }
-
-    if is_virtual_key_down(VK_LWIN.0 as i32) || is_virtual_key_down(VK_RWIN.0 as i32) {
-        mods |= MOD_WIN;
-    }
-
-    MODIFIER_STATE.store(mods, Ordering::Release);
-    mods
-}
-
-/// Lightweight modifier poll for use inside hook callbacks.
-/// Returns the current bitmask without touching `MODIFIER_STATE`.
-/// This is the release-build-safe alternative to reading the atomic that
-/// `keyboard_hook_proc` maintains — see `mouse_hook_proc` doc comment.
-#[inline]
 fn poll_modifiers() -> u32 {
     let mut mods = 0u32;
     if is_virtual_key_down(VK_LMENU.0 as i32)
@@ -256,37 +227,6 @@ fn mark_non_mod_key(vk: u32, down: bool) {
     }
 }
 
-/// Flush the entire non-modifier bitset.  Called from the mouse hook when
-/// no modifier is held — acts as a periodic self-heal in case the keyboard
-/// hook is silently removed by Windows and stale bits accumulate.
-#[inline]
-fn clear_non_mod_keys() {
-    for w in &NON_MOD_PRESSED {
-        w.store(0, Ordering::Release);
-    }
-}
-
-/// Sync pre-computed config values so the hook thread can make decisions
-/// without touching the config mutex.
-fn update_hook_state(config: &AppConfig) {
-    let move_m = modifier_to_mask(config.move_modifier);
-    let resize_m =
-        modifier_to_mask(config.resize_modifier_1) | modifier_to_mask(config.resize_modifier_2);
-    MOVE_MASK.store(move_m, Ordering::Release);
-    RESIZE_MASK.store(resize_m, Ordering::Release);
-    SCROLL_OPACITY_ACTIVE.store(config.scroll_opacity, Ordering::Release);
-    SCROLL_OPACITY_MASK.store(
-        modifier_to_mask(config.scroll_opacity_modifier),
-        Ordering::Release,
-    );
-    log::debug!(
-        "hook state updated: move={:#x} resize={:#x} scroll_opacity={}",
-        move_m,
-        resize_m,
-        config.scroll_opacity,
-    );
-}
-
 fn process_allowed(config: &AppConfig, process_name: &str) -> bool {
     let process_name = process_name.to_ascii_lowercase();
     let listed = config
@@ -301,28 +241,16 @@ fn process_allowed(config: &AppConfig, process_name: &str) -> bool {
     }
 }
 
-/// Exact match: the pressed modifier bits must match the required mask precisely.
-/// No extra modifier bits are allowed.  Combined with the non-modifier key check
-/// in the caller, this ensures window manipulation only activates when the user
-/// is holding exactly the configured modifier keys and nothing else.
-fn determine_mode(mods: u32, config: &AppConfig) -> Option<DragMode> {
-    // Check resize first — it requires strictly more modifiers than move.
-    if config.resize_enabled {
-        let resize_mask =
-            modifier_to_mask(config.resize_modifier_1) | modifier_to_mask(config.resize_modifier_2);
-        if resize_mask != 0 && mods == resize_mask {
-            return Some(DragMode::Resize);
+fn matches_drag(mode: DragMode, mods: u32, config: &AppConfig) -> bool {
+    match mode {
+        DragMode::Move => config.move_enabled && mods == modifier_to_mask(config.move_modifier),
+        DragMode::Resize => {
+            config.resize_enabled
+                && mods
+                    == (modifier_to_mask(config.resize_modifier_1)
+                        | modifier_to_mask(config.resize_modifier_2))
         }
     }
-
-    if config.move_enabled {
-        let move_mask = modifier_to_mask(config.move_modifier);
-        if move_mask != 0 && mods == move_mask {
-            return Some(DragMode::Move);
-        }
-    }
-
-    None
 }
 
 fn determine_resize_direction(cursor: POINT, rect: RECT) -> ResizeDirection {
@@ -361,31 +289,21 @@ fn clamp_rect_for_min_size(rect: &mut RECT, dir: ResizeDirection) {
     }
 }
 
-fn try_create_grab_state(
-    cursor_pos: POINT,
-    mode: DragMode,
-    config: &AppConfig,
-) -> Option<GrabState> {
-    let hwnd = window_manager::window_from_point(cursor_pos.x, cursor_pos.y)?;
-
-    if !window_manager::is_valid_target(hwnd) {
+fn eligible_window(point: POINT, config: &AppConfig) -> Option<HWND> {
+    let hwnd = window_manager::window_from_point(point.x, point.y)?;
+    if !window_manager::is_valid_target(hwnd)
+        || (!config.allow_nonforeground && window_manager::get_foreground_window() != Some(hwnd))
+    {
         return None;
     }
-
-    // Foreground-only mode: skip if the target window is not foreground.
-    if !config.allow_nonforeground {
-        let fg = window_manager::get_foreground_window();
-        if fg != Some(hwnd) {
-            return None;
-        }
+    if config.filter_mode == FilterMode::Blacklist && config.filter_list.is_empty() {
+        return Some(hwnd);
     }
+    let name = window_manager::get_process_name(hwnd)?;
+    process_allowed(config, &name).then_some(hwnd)
+}
 
-    let process_name = window_manager::get_process_name(hwnd)?;
-    if !process_allowed(config, &process_name) {
-        log::debug!("process filtered: {}", process_name);
-        return None;
-    }
-
+fn try_create_grab_state(cursor_pos: POINT, mode: DragMode, hwnd: HWND) -> Option<GrabState> {
     // Always capture the origin rect — used as the authoritative baseline
     // for position computation during the entire grab lifetime.
     let origin_rect = window_manager::get_window_rect(hwnd)?;
@@ -417,7 +335,8 @@ fn try_create_grab_state(
 /// demonstrated clear drag intent (≥ drag_threshold pixels of movement).
 fn commit_grab(grab: &mut GrabState, config: &AppConfig, point: POINT) {
     // Restore snapped or maximized windows before the first real move.
-    if window_manager::is_maximized(grab.hwnd) || window_manager::is_snapped(grab.hwnd) {
+    let restored = window_manager::is_maximized(grab.hwnd) || window_manager::is_snapped(grab.hwnd);
+    if restored {
         window_manager::restore_window(grab.hwnd);
         // Brief sleep to let DWM finish the restore animation.
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -438,134 +357,50 @@ fn commit_grab(grab: &mut GrabState, config: &AppConfig, point: POINT) {
     }
 
     // Recompute resize direction against the post-restore rect.
-    if matches!(grab.mode, DragMode::Resize) {
-        grab.resize_dir = determine_resize_direction(point, grab.origin_rect);
-    }
-
-    grab.committed = true;
-    grab.last_cursor = point;
-}
-
-fn set_active_grab(active: bool) {
-    ACTIVE_GRAB.store(active, Ordering::Relaxed);
-}
-
-/// Process a mouse-move event on the worker thread.
-/// `mods` is the modifier snapshot captured on the hook thread — no re-polling.
-///
-/// Position is computed as `origin_rect + cumulative_delta` rather than
-/// reading `GetWindowRect` every tick.  This makes us authoritative over
-/// the window position and immune to external actors (Snap, app WndProc)
-/// resetting it between our ticks.
-fn worker_handle_mouse_move(
-    point: POINT,
-    mods: u32,
-    non_mod_key: bool,
-    state: &mut Option<GrabState>,
-) {
-    if !HOOK_ENABLED.load(Ordering::Relaxed) {
-        if state.is_some() {
-            overlay::hide();
-        }
-        *state = None;
-        set_active_grab(false);
-        return;
-    }
-
-    let Some(config) = current_config() else {
-        if state.is_some() {
-            overlay::hide();
-        }
-        *state = None;
-        set_active_grab(false);
-        return;
-    };
-
-    if !config.enabled {
-        if state.is_some() {
-            overlay::hide();
-        }
-        *state = None;
-        set_active_grab(false);
-        return;
-    }
-
-    // If a non-modifier key is held, treat as "no matching mode" so the grab
-    // is prevented or torn down — the user is performing a keyboard shortcut.
-    let desired_mode = if non_mod_key {
-        None
-    } else {
-        determine_mode(mods, &config)
-    };
-    let Some(desired_mode) = desired_mode else {
-        // Grab ending — check for snap before clearing state.
-        if let Some(old_grab) = state.take() {
-            log::debug!("grab released: mods={:#x}", mods);
-            // Hide the overlay immediately — don't wait for the snap to complete.
-            overlay::hide();
-            if let Some((zone, rect)) = old_grab.snap_target {
-                if zone == snap::SnapZone::Maximize {
-                    // Maximise via SW_MAXIMIZE so the window enters the DWM-tracked
-                    // maximised state (taskbar peek, restore-on-drag, etc.).
-                    window_manager::maximize_window(old_grab.hwnd);
-                    log::debug!("snapped: Maximize → SW_MAXIMIZE");
-                } else if config.snap_native {
-                    // Trigger native Win+Arrow snap so the window is registered in the
-                    // Win11 snap group — this enables the centre resize divider.
-                    apply_snap_native(old_grab.hwnd, zone);
-                    log::debug!("snapped to zone: {:?} (native)", zone);
-                } else {
-                    // Fallback: position the window directly via SetWindowPos.
-                    window_manager::resize_window(
-                        old_grab.hwnd,
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                    );
-                    log::debug!("snapped to zone: {:?} (SetWindowPos)", zone);
-                }
-            }
-        }
-        set_active_grab(false);
-        return;
-    };
-
-    if state.is_none() {
-        *state = try_create_grab_state(point, desired_mode, &config);
-        if state.is_some() {
-            log::debug!("grab started: mode={:?} mods={:#x}", desired_mode, mods);
-        }
-    }
-
-    let Some(grab) = state.as_mut() else {
-        set_active_grab(false);
-        return;
-    };
-
-    if grab.mode != desired_mode {
-        log::debug!("mode switch: {:?} → {:?}", grab.mode, desired_mode);
-        // On mode switch, resync origin from the actual window position
-        // and reset cumulative deltas so the new mode starts cleanly.
-        if let Some(rect) = window_manager::get_window_rect(grab.hwnd) {
-            grab.origin_rect = rect;
-            grab.cumulative_dx = 0;
-            grab.cumulative_dy = 0;
-        }
-        grab.mode = desired_mode;
+    if restored {
         grab.last_cursor = point;
-        grab.snap_target = None;
-        // If the grab has not committed yet, reset the dead-zone origin to the
-        // mode-switch position so the threshold is re-evaluated from here.
-        if !grab.committed {
-            grab.start_cursor = point;
-        }
-        overlay::hide();
-        if matches!(desired_mode, DragMode::Resize) {
+        if matches!(grab.mode, DragMode::Resize) {
             grab.resize_dir = determine_resize_direction(point, grab.origin_rect);
         }
     }
+    grab.committed = true;
+}
 
+fn finish_grab(state: &mut Option<GrabState>, snap: bool) {
+    let Some(grab) = state.take() else { return };
+    overlay::hide();
+    if !snap || !HOOK_ENABLED.load(Ordering::Acquire) || !window_manager::is_valid_target(grab.hwnd)
+    {
+        return;
+    }
+    let Some(config) = current_config() else {
+        return;
+    };
+    let Some((zone, rect)) = grab.snap_target.filter(|_| config.snap_enabled) else {
+        return;
+    };
+    if zone == snap::SnapZone::Maximize {
+        window_manager::maximize_window(grab.hwnd);
+    } else if !config.snap_native || !apply_snap_native(grab.hwnd, zone) {
+        window_manager::resize_window(
+            grab.hwnd,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        );
+    }
+}
+
+fn worker_handle_mouse_move(point: POINT, state: &mut Option<GrabState>) {
+    let Some(config) = current_config() else {
+        return;
+    };
+    let Some(grab) = state.as_mut() else { return };
+    if !config.enabled || !window_manager::is_valid_target(grab.hwnd) {
+        finish_grab(state, false);
+        return;
+    }
     // Dead-zone: require the cursor to move ≥ drag_threshold pixels (Euclidean)
     // from the grab-start position before actually moving or resizing the window.
     // This prevents accidental operations from minute cursor tremor while a
@@ -576,22 +411,14 @@ fn worker_handle_mouse_move(
         let thr = config.drag_threshold;
         if ddx * ddx + ddy * ddy < thr * thr {
             // Still inside dead-zone — do not move the window.
-            set_active_grab(false);
             return;
         }
-        // Threshold crossed — commit the grab.  Re-anchor last_cursor to the
-        // current point so subsequent cumulative deltas start cleanly from here,
-        // avoiding any position jump on the first committed frame.
-        // Threshold crossed — commit the grab (restore/raise if needed, re-anchor).
         commit_grab(grab, &config, point);
-        set_active_grab(true);
-        return;
     }
 
     let dx = point.x - grab.last_cursor.x;
     let dy = point.y - grab.last_cursor.y;
     if dx == 0 && dy == 0 {
-        set_active_grab(true);
         return;
     }
 
@@ -620,6 +447,8 @@ fn worker_handle_mouse_move(
                     }
                     grab.snap_target = None;
                 }
+            } else if grab.snap_target.take().is_some() {
+                overlay::hide();
             }
         }
         DragMode::Resize => {
@@ -662,104 +491,68 @@ fn worker_handle_mouse_move(
     }
 
     grab.last_cursor = point;
-    set_active_grab(true);
 }
 
-/// Handle scroll wheel — modifier + scroll changes window opacity.
-fn worker_handle_scroll(point: POINT, delta: i16, mods: u32) {
-    let Some(config) = current_config() else {
-        return;
-    };
-    if !config.enabled || !config.scroll_opacity {
+fn worker_handle_scroll(hwnd: HWND, delta: i16) {
+    if !HOOK_ENABLED.load(Ordering::Acquire) || !window_manager::is_valid_target(hwnd) {
         return;
     }
-
-    // Only act when the scroll opacity modifier is held.
-    let opacity_mask = SCROLL_OPACITY_MASK.load(Ordering::Acquire);
-    if opacity_mask == 0 || mods != opacity_mask {
-        return;
-    }
-
-    let Some(hwnd) = window_manager::window_from_point(point.x, point.y) else {
-        return;
-    };
-    if !window_manager::is_valid_target(hwnd) {
-        return;
-    }
-
-    let current = window_manager::get_window_opacity(hwnd) as i32;
+    let current = i32::from(window_manager::get_window_opacity(hwnd));
     let step = if delta > 0 {
         OPACITY_STEP
     } else {
         -OPACITY_STEP
     };
-    let new_alpha = (current + step).clamp(OPACITY_MIN as i32, 255) as u8;
-
-    window_manager::set_window_opacity(hwnd, new_alpha);
-    log::debug!("opacity: {} → {} (delta={})", current, new_alpha, delta);
+    let alpha = (current + step).clamp(i32::from(OPACITY_MIN), 255) as u8;
+    window_manager::set_window_opacity(hwnd, alpha);
 }
 
 fn worker_loop(rx: Receiver<WorkerEvent>) {
-    let mut state: Option<GrabState> = None;
-    // A non-MouseMove event encountered while draining mouse-move events.
-    // Stored here so it is processed on the next iteration instead of dropped.
-    let mut pending: Option<WorkerEvent> = None;
-    loop {
-        let event = if let Some(e) = pending.take() {
-            e
-        } else {
-            match rx.recv() {
-                Ok(e) => e,
-                Err(_) => break,
-            }
-        };
+    let mut state = None;
+    let mut pending = None;
+    while let Some(event) = pending.take().or_else(|| rx.recv().ok()) {
         match event {
-            WorkerEvent::Shutdown => break,
-            WorkerEvent::MouseMove { .. } => {
-                // Drain to latest mouse-move to skip stale coordinates.
-                let (latest, pushed_back) = drain_to_latest_mouse_move(event, &rx);
-                pending = pushed_back;
-                if let WorkerEvent::MouseMove {
-                    point,
-                    mods,
-                    non_mod_key,
-                } = latest
-                {
-                    worker_handle_mouse_move(point, mods, non_mod_key, &mut state);
+            WorkerEvent::Start(point, mode, window) => {
+                finish_grab(&mut state, false);
+                if HOOK_ENABLED.load(Ordering::Acquire) {
+                    state = try_create_grab_state(point, mode, HWND(window as *mut _));
                 }
             }
-            WorkerEvent::MouseWheel { point, delta, mods } => {
-                worker_handle_scroll(point, delta, mods);
+            WorkerEvent::MouseMove(mut point) => {
+                QUEUED_INPUT.fetch_sub(1, Ordering::Relaxed);
+                while let Ok(event) = rx.try_recv() {
+                    if let WorkerEvent::MouseMove(latest) = event {
+                        QUEUED_INPUT.fetch_sub(1, Ordering::Relaxed);
+                        point = latest;
+                    } else {
+                        pending = Some(event);
+                        break;
+                    }
+                }
+                worker_handle_mouse_move(point, &mut state);
             }
+            WorkerEvent::Finish => finish_grab(&mut state, true),
+            WorkerEvent::Cancel => finish_grab(&mut state, false),
+            WorkerEvent::MouseWheel(delta, window) => {
+                QUEUED_INPUT.fetch_sub(1, Ordering::Relaxed);
+                worker_handle_scroll(HWND(window as *mut _), delta);
+            }
+            WorkerEvent::Shutdown => break,
         }
     }
-    log::info!("worker loop exited");
 }
 
-/// Consume all immediately-available MouseMove events from the channel and return
-/// the last one.  This ensures the worker always acts on the freshest
-/// cursor position rather than processing a backlog of stale coordinates.
-///
-/// Returns `(latest_move, Option<non_move_event>)`. If a non-MouseMove event is
-/// encountered while draining, it is returned as the second element so the caller
-/// can process it on the next iteration — previously it would have been silently dropped.
-#[inline]
-fn drain_to_latest_mouse_move(
-    first: WorkerEvent,
-    rx: &Receiver<WorkerEvent>,
-) -> (WorkerEvent, Option<WorkerEvent>) {
-    let mut latest = first;
-    while let Ok(ev) = rx.try_recv() {
-        match ev {
-            WorkerEvent::MouseMove { .. } => {
-                latest = ev;
-            }
-            // Non-move event (Shutdown, MouseWheel): stop draining
-            // and hand it back to the caller so it is not silently dropped.
-            other => return (latest, Some(other)),
-        }
+fn finish_captured_button(button: &Cell<Option<CapturedButton>>, snap: bool) {
+    if let Some(mut capture) = button.get().filter(|capture| capture.dragging) {
+        capture.dragging = false;
+        // Still consume the matching button-up after a key release or cancellation.
+        button.set(Some(capture));
+        send_event(if snap {
+            WorkerEvent::Finish
+        } else {
+            WorkerEvent::Cancel
+        });
     }
-    (latest, None)
 }
 
 /// Keyboard hook — event-driven modifier tracking.
@@ -777,21 +570,50 @@ unsafe extern "system" fn keyboard_hook_proc(
         // would also suppress legitimate synthetic input from third-party tools.
         if kb.dwExtraInfo != GLIDE_SYNTHETIC_EXTRA_INFO {
             let msg = w_param.0 as u32;
-            if let Some(mask) = key_to_mask(kb.vkCode) {
-                if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                    MODIFIER_STATE.fetch_or(mask, Ordering::Release);
-                } else {
-                    MODIFIER_STATE.fetch_and(!mask, Ordering::Release);
-                }
-            } else {
-                // Non-modifier key — track in bitset for exact-match detection.
-                let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-                mark_non_mod_key(kb.vkCode, is_down);
+            let pressed = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            let modifier = key_to_mask(kb.vkCode);
+            if modifier.is_none() {
+                mark_non_mod_key(kb.vkCode, pressed);
             }
+            CAPTURED_BUTTON.with(|button| {
+                let Some(capture) = button.get().filter(|capture| capture.dragging) else {
+                    return;
+                };
+                match modifier {
+                    Some(mask) if !pressed && capture.modifiers & mask != 0 => {
+                        // The key release has not reached GetAsyncKeyState yet.
+                        if !other_modifier_key_down(kb.vkCode) {
+                            finish_captured_button(button, true);
+                        }
+                    }
+                    Some(mask) if pressed && capture.modifiers & mask == 0 => {
+                        finish_captured_button(button, false);
+                    }
+                    None if pressed => finish_captured_button(button, false),
+                    _ => {}
+                }
+            });
         }
     }
 
     unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+}
+
+fn other_modifier_key_down(vk: u32) -> bool {
+    for (left, right) in [
+        (VK_LMENU, VK_RMENU),
+        (VK_LCONTROL, VK_RCONTROL),
+        (VK_LSHIFT, VK_RSHIFT),
+        (VK_LWIN, VK_RWIN),
+    ] {
+        if vk == u32::from(left.0) {
+            return is_virtual_key_down(i32::from(right.0));
+        }
+        if vk == u32::from(right.0) {
+            return is_virtual_key_down(i32::from(left.0));
+        }
+    }
+    false
 }
 
 /// Apply a snap zone by simulating the native Win+Arrow keyboard shortcut.
@@ -804,20 +626,22 @@ unsafe extern "system" fn keyboard_hook_proc(
 ///
 /// The Win key is held for the full sequence so Windows treats `Left`+`Up` as a
 /// single quarter-snap gesture and skips the Snap Assist prompt between them.
-fn apply_snap_native(hwnd: HWND, zone: snap::SnapZone) {
-    // Bring the target window to foreground first.
-    // SendInput targets the current foreground window — there is no per-HWND API.
-    // SetForegroundWindow can be denied by the OS foreground-lock when called from a
-    // background thread; log a warning so the snap silently degrades rather than failing hard.
-    if !window_manager::set_foreground(hwnd) {
-        log::warn!(
-            "apply_snap_native: SetForegroundWindow denied — Win+Arrow may target wrong window"
-        );
+fn apply_snap_native(hwnd: HWND, zone: snap::SnapZone) -> bool {
+    // On mouse release a modifier may still be down. Direct placement keeps
+    // that modifier from changing the meaning of the synthesized shortcut.
+    if poll_modifiers() != 0 || any_non_modifier_key_down() {
+        return false;
+    }
+    if window_manager::get_foreground_window() != Some(hwnd) {
+        window_manager::set_foreground(hwnd);
+        if window_manager::get_foreground_window() != Some(hwnd) {
+            return false;
+        }
     }
     let h_vk: VIRTUAL_KEY = match zone {
         snap::SnapZone::Left | snap::SnapZone::TopLeft | snap::SnapZone::BottomLeft => VK_LEFT,
         snap::SnapZone::Right | snap::SnapZone::TopRight | snap::SnapZone::BottomRight => VK_RIGHT,
-        snap::SnapZone::Maximize => return, // handled separately via SW_MAXIMIZE
+        snap::SnapZone::Maximize => return false, // handled separately via SW_MAXIMIZE
     };
 
     let v_vk: Option<VIRTUAL_KEY> = match zone {
@@ -860,132 +684,97 @@ fn apply_snap_native(hwnd: HWND, zone: snap::SnapZone) {
     }
     inputs.push(ki(VK_LWIN, true)); // Win ↑
 
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
+    (unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) }) as usize == inputs.len()
 }
 
-/// Mouse hook — reads modifier state and sends it with the event.
-///
-/// ## Modifier polling strategy (GetAsyncKeyState)
-///
-/// We poll modifiers via `GetAsyncKeyState` (the `poll_modifiers()` helper)
-/// instead of reading the `MODIFIER_STATE` atomic that `keyboard_hook_proc`
-/// maintains.  This is intentional: Windows (Defender, anti-keylogger heuristics,
-/// or the hook-timeout watchdog) can silently remove `WH_KEYBOARD_LL` hooks from
-/// packaged / unsigned executables while leaving `WH_MOUSE_LL` intact.  When that
-/// happens, `MODIFIER_STATE` never updates and modifier+mouse gestures stop
-/// working — the symptom reported in release builds.
-///
-/// `GetAsyncKeyState` queries the physical key state directly from the OS input
-/// subsystem, so it works regardless of whether the keyboard hook is alive.
-///
-/// **To revert to the hook-driven approach**, replace every `poll_modifiers()`
-/// call in this function with `MODIFIER_STATE.load(Ordering::Acquire)`.
-///
-/// AltSnap pattern: **always pass WM_MOUSEMOVE through** (CallNextHookEx).
-/// Swallowing causes OS mouse-tracking and DWM to lose context,
-/// which can trigger snap-back or jitter.
-///
-/// WM_MOUSEWHEEL and WM_MBUTTONDOWN are **swallowed** when modifier is held
-/// and the corresponding feature is enabled — this prevents the underlying
-/// app from also receiving the event.
+/// Handle button capture and pass matching window work to the worker.
 unsafe extern "system" fn mouse_hook_proc(
     n_code: i32,
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
-    if n_code < 0 {
-        return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
-    }
-    if !HOOK_ENABLED.load(Ordering::Relaxed) {
-        set_active_grab(false);
-        return unsafe { CallNextHookEx(None, n_code, w_param, l_param) };
-    }
-
-    let msg = w_param.0 as u32;
-
-    match msg {
-        WM_MOUSEMOVE => {
-            let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
-            // Poll modifiers + non-modifier key state via GetAsyncKeyState.
-            // Immune to keyboard hook removal (same rationale as poll_modifiers).
-            let mods = poll_modifiers();
-            // Read non-modifier key state from the keyboard-hook bitset.
-            // When no modifier is held, flush the bitset to self-heal stale
-            // bits (e.g. if Windows silently removed the keyboard hook).
-            let non_mod_key = if mods != 0 {
-                any_non_modifier_key_down()
-            } else {
-                clear_non_mod_keys();
-                false
+    if n_code >= 0
+        && CAPTURED_BUTTON.with(|button| {
+            let msg = w_param.0 as u32;
+            let down = match msg {
+                WM_LBUTTONDOWN => Some(DragMode::Move),
+                WM_RBUTTONDOWN => Some(DragMode::Resize),
+                _ => None,
             };
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.try_send(WorkerEvent::MouseMove {
-                    point: mouse.pt,
-                    mods,
-                    non_mod_key,
-                });
-            }
-            // Always pass through — never swallow WM_MOUSEMOVE.
-            unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
-        }
-
-        WM_MOUSEWHEEL => {
-            // CHANGED: poll via GetAsyncKeyState — immune to keyboard hook removal.
-            // Revert: `let mods = MODIFIER_STATE.load(Ordering::Acquire);`
-            let mods = poll_modifiers();
-            let opacity_mask = SCROLL_OPACITY_MASK.load(Ordering::Acquire);
-            let feature_active = SCROLL_OPACITY_ACTIVE.load(Ordering::Relaxed);
-
-            if feature_active
-                && opacity_mask != 0
-                && mods == opacity_mask
-                && !any_non_modifier_key_down()
-            {
-                // Modifier held + feature on → swallow and send to worker.
-                let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
-                let delta = (mouse.mouseData >> 16) as i16;
-                if let Some(tx) = WORKER_TX.get() {
-                    let _ = tx.try_send(WorkerEvent::MouseWheel {
-                        point: mouse.pt,
-                        delta,
-                        mods,
-                    });
+            let up = match msg {
+                WM_LBUTTONUP => Some(DragMode::Move),
+                WM_RBUTTONUP => Some(DragMode::Resize),
+                _ => None,
+            };
+            if let Some(capture) = button.get() {
+                if up == Some(capture.mode) {
+                    finish_captured_button(button, true);
+                    button.set(None);
+                    return true;
                 }
-                LRESULT(1) // Swallow
-            } else {
-                unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
+                if msg == WM_MOUSEMOVE && capture.dragging {
+                    if !HOOK_ENABLED.load(Ordering::Acquire) || any_non_modifier_key_down() {
+                        finish_captured_button(button, false);
+                    } else if poll_modifiers() != capture.modifiers {
+                        finish_captured_button(button, true);
+                    } else {
+                        let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+                        queue_input(WorkerEvent::MouseMove(mouse.pt));
+                    }
+                }
+                return down == Some(capture.mode);
             }
-        }
-
-        _ => unsafe { CallNextHookEx(None, n_code, w_param, l_param) },
+            if !HOOK_ENABLED.load(Ordering::Acquire) || (down.is_none() && msg != WM_MOUSEWHEEL) {
+                return false;
+            }
+            let mods = poll_modifiers();
+            if mods == 0 || any_non_modifier_key_down() {
+                return false;
+            }
+            let Some(config) = SHARED_CONFIG.get().and_then(|shared| shared.try_lock()) else {
+                return false;
+            };
+            let matches = if let Some(mode) = down {
+                matches_drag(mode, mods, &config)
+            } else {
+                config.scroll_opacity && mods == modifier_to_mask(config.scroll_opacity_modifier)
+            };
+            if !matches {
+                return false;
+            }
+            let config = config.clone();
+            let mouse = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+            let Some(hwnd) = eligible_window(mouse.pt, &config) else {
+                return false;
+            };
+            let window = hwnd.0 as usize;
+            if let Some(mode) = down {
+                if send_event(WorkerEvent::Start(mouse.pt, mode, window)) {
+                    button.set(Some(CapturedButton {
+                        mode,
+                        modifiers: mods,
+                        dragging: true,
+                    }));
+                    return true;
+                }
+                false
+            } else {
+                let delta = (mouse.mouseData >> 16) as i16;
+                delta != 0 && queue_input(WorkerEvent::MouseWheel(delta, window))
+            }
+        })
+    {
+        return LRESULT(1);
     }
+    unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
 }
 
-fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
-    if let Some(shared) = SHARED_CONFIG.get() {
-        if !Arc::ptr_eq(shared, &config) {
-            let cfg = config.lock().clone();
-            *shared.lock() = cfg;
-        }
-    } else {
-        let _ = SHARED_CONFIG.set(config.clone());
-    }
-
-    // Sync hook state from config.
-    update_hook_state(&config.lock());
-
-    // Sync modifier state from physical keyboard before hooks are active
-    let initial = refresh_modifier_state_from_keyboard();
-    log::debug!("initial modifier state: {:#x}", initial);
-
+fn hook_thread_main(ready: Sender<bool>) {
     // Create the snap overlay window on this thread (needs the message loop).
     overlay::create();
 
-    let (worker_tx, worker_rx) = mpsc::sync_channel::<WorkerEvent>(WORKER_QUEUE_SIZE);
+    let (worker_tx, worker_rx) = mpsc::channel::<WorkerEvent>();
     let _ = WORKER_TX.set(worker_tx);
-    thread::spawn(move || worker_loop(worker_rx));
 
     let keyboard_hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), None, 0) };
@@ -1009,10 +798,14 @@ fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
                 let _ = unsafe { UnhookWindowsHookEx(hook) };
             }
             overlay::destroy();
+            let _ = ready.send(false);
             return;
         }
     };
 
+    thread::spawn(move || worker_loop(worker_rx));
+    HOOK_READY.store(true, Ordering::Release);
+    let _ = ready.send(true);
     let mut msg = MSG::default();
     loop {
         let status = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -1027,48 +820,26 @@ fn hook_thread_main(config: Arc<Mutex<AppConfig>>) {
     }
 
     log::info!("hook thread shutting down");
-    // Signal the worker thread to exit gracefully before unhooking.
-    // This prevents the worker from blocking indefinitely on rx.recv().
-    if let Some(tx) = WORKER_TX.get() {
-        let _ = tx.send(WorkerEvent::Shutdown);
-    }
+    HOOK_READY.store(false, Ordering::Release);
     let _ = unsafe { UnhookWindowsHookEx(keyboard_hook) };
     let _ = unsafe { UnhookWindowsHookEx(mouse_hook) };
+    send_event(WorkerEvent::Shutdown);
     overlay::destroy();
 }
 
-pub fn start_hook_thread(config: Arc<Mutex<AppConfig>>) -> u32 {
-    if let Some(shared) = SHARED_CONFIG.get() {
-        if !Arc::ptr_eq(shared, &config) {
-            let cfg = config.lock().clone();
-            *shared.lock() = cfg;
-        }
-    } else {
-        let _ = SHARED_CONFIG.set(config.clone());
-    }
-
-    // Pre-compute state so the hook thread has them even before hook_thread_main runs.
-    update_hook_state(&config.lock());
-
+pub fn start_hook_thread(config: Arc<Mutex<AppConfig>>) -> bool {
+    let _ = SHARED_CONFIG.set(config);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let thread_id = unsafe { GetCurrentThreadId() };
-        let _ = tx.send(thread_id);
-        hook_thread_main(config);
+        HOOK_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+        hook_thread_main(tx);
+        HOOK_THREAD_ID.store(0, Ordering::Release);
     });
+    rx.recv().unwrap_or(false)
+}
 
-    let thread_id = match rx.recv() {
-        Ok(tid) if tid != 0 => tid,
-        Ok(_) | Err(_) => {
-            log::error!("hook thread failed to start — hooks will not function");
-            0
-        }
-    };
-    HOOK_THREAD_ID.store(thread_id, Ordering::Release);
-    if thread_id != 0 {
-        log::info!("hook thread spawned: tid={}", thread_id);
-    }
-    thread_id
+pub fn is_ready() -> bool {
+    HOOK_READY.load(Ordering::Acquire)
 }
 
 /// Signal the hook thread to shut down gracefully by posting `WM_QUIT` to its message loop.
@@ -1087,33 +858,9 @@ pub fn shutdown() {
 }
 
 pub fn set_enabled(enabled: bool) {
-    log::info!("hook enabled={}", enabled);
-    HOOK_ENABLED.store(enabled, Ordering::Release);
-    if !enabled {
-        set_active_grab(false);
-    }
-}
-
-pub fn update_config(config: Arc<Mutex<AppConfig>>) {
-    let cfg = config.lock().clone();
-
-    // Update hook state so the hook thread picks up new keybindings and feature flags.
-    update_hook_state(&cfg);
-
-    // SHARED_CONFIG is a OnceLock — it can only be set once (the first call to
-    // start_hook_thread or update_config). After that, the OnceLock holds the
-    // canonical Arc. If the caller passes a *different* Arc, we copy the inner
-    // config value into the shared Arc rather than trying to replace the lock.
-    // This keeps the hook thread's SHARED_CONFIG reference stable while still
-    // picking up the new settings.
-    if let Some(shared) = SHARED_CONFIG.get() {
-        if !Arc::ptr_eq(shared, &config) {
-            // Different Arc — copy the value into the existing shared one.
-            *shared.lock() = cfg;
-        }
-        // Same Arc — hook thread already sees the updated value (shared ref).
-    } else {
-        let _ = SHARED_CONFIG.set(config);
+    let previous = HOOK_ENABLED.swap(enabled, Ordering::AcqRel);
+    if previous && !enabled {
+        send_event(WorkerEvent::Cancel);
     }
 }
 
@@ -1281,120 +1028,29 @@ mod tests {
         assert!(!process_allowed(&config, ""));
     }
 
-    // ===== Tests for determine_mode =====
-
     #[test]
-    fn test_determine_mode_no_modifiers() {
+    fn each_button_requires_its_configured_modifiers() {
         let config = AppConfig::default();
-        assert_eq!(determine_mode(0, &config), None);
+        assert!(matches_drag(DragMode::Move, MOD_ALT, &config));
+        assert!(!matches_drag(DragMode::Resize, MOD_ALT, &config));
+        assert!(matches_drag(DragMode::Resize, MOD_ALT | MOD_SHIFT, &config));
+        assert!(!matches_drag(DragMode::Move, MOD_ALT | MOD_SHIFT, &config));
+        assert!(!matches_drag(DragMode::Move, 0, &config));
     }
 
     #[test]
-    fn test_determine_mode_move_default() {
-        let config = AppConfig::default();
-        assert_eq!(determine_mode(MOD_ALT, &config), Some(DragMode::Move));
-    }
-
-    #[test]
-    fn test_determine_mode_resize_default() {
-        let config = AppConfig::default();
-        assert_eq!(
-            determine_mode(MOD_ALT | MOD_SHIFT, &config),
-            Some(DragMode::Resize)
-        );
-    }
-
-    #[test]
-    fn test_determine_mode_all_modifiers_no_match() {
-        let config = AppConfig::default();
-        // All modifiers held — exact match rejects extra modifiers
-        assert_eq!(determine_mode(0xF, &config), None);
-    }
-
-    #[test]
-    fn test_determine_mode_only_resize_modifier_2() {
-        let config = AppConfig::default();
-        // Only shift held (resize_modifier_2) → None (need both resize modifiers)
-        assert_eq!(determine_mode(MOD_SHIFT, &config), None);
-    }
-
-    #[test]
-    fn test_determine_mode_custom_config() {
-        let config = AppConfig {
-            move_modifier: ModifierKey::Ctrl,
+    fn buttons_can_share_modifiers_and_be_disabled_independently() {
+        let mut config = AppConfig {
+            resize_modifier_2: ModifierKey::Alt,
             ..AppConfig::default()
         };
-        assert_eq!(determine_mode(MOD_CTRL, &config), Some(DragMode::Move));
-    }
-
-    #[test]
-    fn test_determine_mode_extra_modifier_rejected_move() {
-        let config = AppConfig::default(); // move = Alt
-                                           // Alt + Ctrl — extra Ctrl bit rejects exact match for Move
-        assert_eq!(determine_mode(MOD_ALT | MOD_CTRL, &config), None);
-    }
-
-    #[test]
-    fn test_determine_mode_extra_modifier_rejected_resize() {
-        let config = AppConfig::default(); // resize = Alt + Shift
-                                           // Alt + Shift + Ctrl — extra Ctrl bit rejects exact match for Resize
-        assert_eq!(
-            determine_mode(MOD_ALT | MOD_SHIFT | MOD_CTRL, &config),
-            None
-        );
-    }
-
-    #[test]
-    fn test_determine_mode_exact_move_and_resize() {
-        let config = AppConfig::default(); // move = Alt, resize = Alt + Shift
-                                           // Exact Alt → Move
-        assert_eq!(determine_mode(MOD_ALT, &config), Some(DragMode::Move));
-        // Exact Alt + Shift → Resize
-        assert_eq!(
-            determine_mode(MOD_ALT | MOD_SHIFT, &config),
-            Some(DragMode::Resize)
-        );
-        // Alt + Win → None (extra Win)
-        assert_eq!(determine_mode(MOD_ALT | MOD_WIN, &config), None);
-    }
-
-    #[test]
-    fn test_determine_mode_move_disabled() {
-        let config = AppConfig {
-            move_enabled: false,
-            ..AppConfig::default()
-        };
-        // Move modifier held but move is disabled → None
-        assert_eq!(determine_mode(MOD_ALT, &config), None);
-        // Resize still works when move is disabled
-        assert_eq!(
-            determine_mode(MOD_ALT | MOD_SHIFT, &config),
-            Some(DragMode::Resize)
-        );
-    }
-
-    #[test]
-    fn test_determine_mode_resize_disabled() {
-        let config = AppConfig {
-            resize_enabled: false,
-            ..AppConfig::default()
-        };
-        // Resize modifier held but resize is disabled → falls through to move check
-        // Since Alt+Shift != Alt (exact match), this is None anyway.
-        assert_eq!(determine_mode(MOD_ALT | MOD_SHIFT, &config), None);
-        // Move still works when resize is disabled
-        assert_eq!(determine_mode(MOD_ALT, &config), Some(DragMode::Move));
-    }
-
-    #[test]
-    fn test_determine_mode_both_disabled() {
-        let config = AppConfig {
-            move_enabled: false,
-            resize_enabled: false,
-            ..AppConfig::default()
-        };
-        assert_eq!(determine_mode(MOD_ALT, &config), None);
-        assert_eq!(determine_mode(MOD_ALT | MOD_SHIFT, &config), None);
+        assert!(matches_drag(DragMode::Move, MOD_ALT, &config));
+        assert!(matches_drag(DragMode::Resize, MOD_ALT, &config));
+        config.move_enabled = false;
+        assert!(!matches_drag(DragMode::Move, MOD_ALT, &config));
+        assert!(matches_drag(DragMode::Resize, MOD_ALT, &config));
+        config.resize_enabled = false;
+        assert!(!matches_drag(DragMode::Resize, MOD_ALT, &config));
     }
 
     // ===== Tests for determine_resize_direction =====

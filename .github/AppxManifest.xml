@@ -4,18 +4,18 @@
   {{PUBLISHER}}, {{VERSION}}, {{IDENTITY_NAME}}, and {{PUBLISHER_DISPLAY_NAME}}
   are replaced at build time by the release workflow.
 
-  GitHub Secrets (from Partner Center > Product Identity):
+  GitHub repository variables (from Partner Center > Product Identity):
     - MSIX_PUBLISHER:              Package/Identity/Publisher (e.g. "CN=00000000-...")
     - MSIX_IDENTITY_NAME:          Package/Identity/Name (e.g. "12345Publisher.Glide")
     - MSIX_PUBLISHER_DISPLAY_NAME: Package/Properties/PublisherDisplayName
 
-  If secrets are unset, defaults are used for local/sideload builds.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap3 rescap">
+  IgnorableNamespaces="uap desktop rescap">
 
   <Identity
     Name="{{IDENTITY_NAME}}"
@@ -42,12 +42,17 @@
 
   <Applications>
     <Application Id="Glide" Executable="glide.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap3:VisualElements
+      <uap:VisualElements
         DisplayName="Glide"
         Description="Modifier key + mouse window move/resize utility for Windows"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="glide.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="GlideStartup" Enabled="false" DisplayName="Glide" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
 

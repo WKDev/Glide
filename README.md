@@ -20,10 +20,9 @@ A modifier key + mouse window move/resize utility for Windows. Hold a modifier k
 - **Window Resizing**: Hold Alt+Shift + right-click and drag to resize any window
 - **Configurable Modifiers**: Customize which modifier keys trigger move and resize actions (Alt, Ctrl, Shift, Win)
 - **Process Filtering**: Whitelist or blacklist specific applications from using the utility
-- **Auto-start**: Optionally launch Glide automatically on Windows startup
+- **Auto-start**: Optionally launch Glide automatically when you sign in to Windows
 - **Window Snapping**: Snap windows to grid positions with configurable threshold
 - **Scroll Opacity**: Adjust window opacity while scrolling with modifier key held
-- **Middle-click Topmost**: Bring window to top with middle-click while holding modifier
 - **System Tray Integration**: Lightweight tray icon for quick access to settings
 - **Settings Persistence**: All configuration automatically saved with debouncing
 
@@ -43,33 +42,36 @@ Run the installer and follow the on-screen prompts. The application will be adde
 - **Move Window**: Hold **Alt** + left-click and drag anywhere on a window
 - **Resize Window**: Hold **Alt+Shift** + right-click and drag to resize
 - **Adjust Opacity**: Hold **Alt** + scroll wheel to adjust window transparency
-- **Bring to Top**: Middle-click while holding **Alt** to bring window to foreground
+- **Snap Window**: While moving a window, approach a screen edge and release the mouse button. To request native Windows snap groups, release the modifier keys first.
+- **Pause Glide**: Right-click the tray icon and select **Pause window controls**. The tray also offers **Resume window controls**.
 
 ### Configuration
 
 Access settings by clicking the Glide icon in your system tray. The following options are available:
 
-| Option                | Description                                  | Default   |
-| --------------------- | -------------------------------------------- | --------- |
-| `move_modifier`       | Modifier key for moving windows              | Alt       |
-| `resize_modifier_1`   | First modifier for resizing                  | Alt       |
-| `resize_modifier_2`   | Second modifier for resizing                 | Shift     |
-| `filter_mode`         | Process filtering mode (whitelist/blacklist) | Blacklist |
-| `autostart`           | Launch on Windows startup                    | Off       |
-| `allow_nonforeground` | Allow move/resize on non-foreground windows  | On        |
-| `snap_enabled`        | Enable window snapping to grid               | On        |
-| `scroll_opacity`      | Allow opacity adjustment via scroll          | On        |
-| `middleclick_topmost` | Bring window to top on middle-click          | On        |
+| Option                | Description                                    | Default        |
+| --------------------- | ---------------------------------------------- | -------------- |
+| `move_modifier`       | Modifier key for moving windows                | Alt            |
+| `resize_modifier_1`   | First modifier for resizing                    | Alt            |
+| `resize_modifier_2`   | Second modifier for resizing                   | Shift          |
+| `filter_mode`         | Process filtering mode (whitelist/blacklist)   | Blacklist      |
+| `autostart`           | Launch on Windows startup                      | Off            |
+| `allow_nonforeground` | Allow move/resize on non-foreground windows    | On             |
+| `snap_enabled`        | Enable window snapping to grid                 | On             |
+| `scroll_opacity`      | Allow opacity adjustment via scroll            | On             |
+| `move_enabled`        | Enable the move gesture                        | On             |
+| `resize_enabled`      | Enable the resize gesture                      | On             |
+| `resize_mode`         | Resize from the nearest corner or bottom-right | Nearest corner |
 
-Settings are automatically saved with a 220ms debounce.
+Settings are saved automatically. If a save fails, the settings window offers a retry.
 
 ## Development
 
 ### Prerequisites
 
-- **Rust toolchain** (1.70+) — [Install from rustup.rs](https://rustup.rs/)
-- **Node.js 18+** — [Download from nodejs.org](https://nodejs.org/)
-- **pnpm** — Install with `npm install -g pnpm`
+- **Rust toolchain** (stable) — [Install from rustup.rs](https://rustup.rs/)
+- **Node.js 24** — [Download from nodejs.org](https://nodejs.org/)
+- **pnpm 9** — Install with `npm install -g pnpm@9`
 - **Windows** — This project is Windows-only
 
 ### Getting Started
@@ -121,7 +123,7 @@ This generates:
 - **NSIS Installer** — `src-tauri/target/release/bundle/nsis/glide_<version>_x64-setup.exe`
 - **MSI Installer** — `src-tauri/target/release/bundle/msi/glide_<version>_x64.msi`
 
-Both installers include the complete application and can be distributed to end users.
+Both installers include the application. For Store submission and signing instructions, see [Release & Signing](CONTRIBUTING.md#release--signing).
 
 ## Known Limitations
 

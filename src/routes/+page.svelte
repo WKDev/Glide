@@ -3,8 +3,8 @@
   import { Switch, RadioGroup, Select } from 'bits-ui';
   import { invoke } from '@tauri-apps/api/core';
   import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
-  import type { AppConfig } from '$lib/config';
-  import { MODIFIER_OPTIONS, DEFAULT_CONFIG } from '$lib/config';
+  import type { AppConfig } from '../lib/config';
+  import { MODIFIER_OPTIONS, DEFAULT_CONFIG } from '../lib/config';
   import { check } from '@tauri-apps/plugin-updater';
   import { getVersion } from '@tauri-apps/api/app';
   import { relaunch } from '@tauri-apps/plugin-process';
@@ -15,7 +15,11 @@
   let runningProcesses = $state<string[]>([]);
   let runningProcessValue = $state('');
   let autostartEnabled = $state(false);
+  let changingAutostart = $state(false);
   let loaded = $state(false);
+  let hookReady = $state<boolean | null>(null);
+  let storeBuild = $state(false);
+  let checkingUpdate = $state(false);
   let updateAvailable = $state<{ version: string } | null>(null);
   let isUpdating = $state(false);
   let autostartError = $state<string | null>(null);
@@ -23,54 +27,48 @@
   let updateCheckFailed = $state(false);
   let activeSection = $state<'general' | 'process-filter' | 'about'>('general');
   let lastSavedSnapshot = $state('');
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let saving = $state(false);
+  let failedSnapshot = $state<string | null>(null);
+  let loadError = $state(false);
+  const snapshot = $derived(JSON.stringify(config));
+  const hasUnsavedChanges = $derived(loaded && snapshot !== lastSavedSnapshot);
 
   onMount(async () => {
-    // Fire update check concurrently so it does not block UI initialisation.
-    const updateCheckPromise = check()
-      .then(async (update) => {
-        if (update) {
-          updateAvailable = { version: update.version };
-          isUpdating = true;
-          try {
-            await update.downloadAndInstall();
-            await relaunch();
-          } catch (e) {
-            console.error('Auto-update install failed:', e);
-            isUpdating = false;
-          }
-        }
+    const getStatus = invoke<{ hook_ready: boolean; store_build: boolean }>(
+      'get_app_status'
+    )
+      .then((status) => {
+        hookReady = status.hook_ready;
+        storeBuild = status.store_build;
+        if (!storeBuild) void checkForUpdate();
       })
-      .catch((e) => {
-        console.error('Update check failed:', e);
+      .catch((error) => {
+        console.error('Failed to read Glide status:', error);
         updateCheckFailed = true;
       });
 
     try {
-      const loaded_cfg = await invoke<AppConfig>('get_config');
-      config = loaded_cfg;
-    } catch (e) {
-      console.error('Failed to load config from backend:', e);
-      config = { ...DEFAULT_CONFIG };
+      config = await invoke<AppConfig>('get_config');
+      try {
+        await getStatus;
+        autostartEnabled = storeBuild
+          ? await invoke<boolean>('store_autostart')
+          : await isEnabled();
+        config.autostart = autostartEnabled;
+      } catch (error) {
+        console.error('Failed to read autostart state:', error);
+        autostartEnabled = config.autostart;
+      }
+      lastSavedSnapshot = JSON.stringify(config);
+      loaded = true;
+    } catch (error) {
+      console.error('Failed to load settings:', error);
+      loadError = true;
     }
-    try {
-      autostartEnabled = await isEnabled();
-      config.autostart = autostartEnabled;
-    } catch (e) {
-      console.error('Failed to read autostart state:', e);
-      autostartEnabled = false;
-    }
-    await loadRunning();
-    appVersion = await getVersion().catch(() => '');
-    try {
-      await invoke('set_hook_enabled', { enabled: config.enabled });
-    } catch (e) {
-      console.error('Failed to sync hook enabled state:', e);
-    }
-    lastSavedSnapshot = JSON.stringify(config);
-    loaded = true;
 
-    void updateCheckPromise;
+    void loadRunning();
+    appVersion = await getVersion().catch(() => '');
+    await getStatus;
   });
 
   const moveLabel = $derived(
@@ -126,21 +124,33 @@
   }
 
   async function toggleAutostart(next: boolean) {
+    if (changingAutostart) return;
+    changingAutostart = true;
+    const previous = autostartEnabled;
     autostartEnabled = next;
-    config.autostart = next;
     autostartError = null;
     try {
-      if (next) {
-        await enable();
+      if (storeBuild) {
+        autostartEnabled = await invoke<boolean>('store_autostart', {
+          enabled: next,
+        });
+        if (autostartEnabled !== next) {
+          autostartError = 'Change the Glide setting in Windows Startup Apps.';
+        }
       } else {
-        await disable();
+        if (next) await enable();
+        else await disable();
+        autostartEnabled = next;
       }
-    } catch {
-      autostartError = next
-        ? 'Failed to enable autostart'
-        : 'Failed to disable autostart';
-      autostartEnabled = !next;
-      config.autostart = !next;
+      config.autostart = autostartEnabled;
+    } catch (error) {
+      autostartEnabled = previous;
+      console.error('Could not change autostart:', error);
+      autostartError = storeBuild
+        ? 'Could not change autostart. Check Windows Startup Apps.'
+        : 'Could not change autostart.';
+    } finally {
+      changingAutostart = false;
     }
   }
 
@@ -148,48 +158,62 @@
     config.filter_list = config.filter_list.filter((p) => p !== name);
   }
 
+  async function checkForUpdate() {
+    checkingUpdate = true;
+    updateCheckFailed = false;
+    try {
+      const update = await check();
+      updateAvailable = update ? { version: update.version } : null;
+      await update?.close();
+    } catch (error) {
+      console.error('Update check failed:', error);
+      updateCheckFailed = true;
+    } finally {
+      checkingUpdate = false;
+    }
+  }
+
   async function installUpdate() {
-    if (isUpdating) return;
+    if (isUpdating || saving || hasUnsavedChanges || changingAutostart) return;
     isUpdating = true;
     updateError = null;
     try {
       const update = await check();
-      if (update) {
-        await update.downloadAndInstall();
-        await relaunch();
+      if (!update) {
+        updateAvailable = null;
+        return;
       }
-    } catch (e) {
-      console.error('Update install failed:', e);
+      await update.downloadAndInstall();
+      await relaunch();
+    } catch (error) {
+      console.error('Update install failed:', error);
       updateError = 'Update failed. Please try again.';
+    } finally {
       isUpdating = false;
     }
   }
 
-  $effect(() => {
-    if (!loaded) return;
-
-    const snapshot = JSON.stringify(config);
-    if (snapshot === lastSavedSnapshot) return;
-
-    if (saveTimer) {
-      clearTimeout(saveTimer);
+  async function saveSettings(sentSnapshot: string) {
+    saving = true;
+    try {
+      await invoke('set_config', {
+        config: JSON.parse(sentSnapshot) as AppConfig,
+      });
+      lastSavedSnapshot = sentSnapshot;
+      failedSnapshot = null;
+    } catch (error) {
+      console.error('Autosave failed:', error);
+      failedSnapshot = sentSnapshot;
+    } finally {
+      saving = false;
     }
+  }
 
-    saveTimer = setTimeout(async () => {
-      try {
-        await invoke('set_config', { config });
-        lastSavedSnapshot = JSON.stringify(config);
-      } catch (e) {
-        console.error('Autosave failed:', e);
-      }
-    }, 220);
-
-    return () => {
-      if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-      }
-    };
+  $effect(() => {
+    if (!hasUnsavedChanges || saving || snapshot === failedSnapshot) return;
+    const pendingSnapshot = snapshot;
+    const timer = setTimeout(() => void saveSettings(pendingSnapshot), 220);
+    return () => clearTimeout(timer);
   });
 </script>
 
@@ -226,10 +250,33 @@
           About
         </button>
       </nav>
-      <p class="side-note">Settings are saved automatically.</p>
+      {#if loadError}
+        <p class="side-note error-text" role="alert">
+          Could not load settings. Restart Glide to retry.
+        </p>
+      {:else if failedSnapshot === snapshot && hasUnsavedChanges}
+        <p class="side-note error-text" role="alert">
+          Could not save settings.
+        </p>
+        <button class="update-btn" onclick={() => (failedSnapshot = null)}
+          >Retry save</button
+        >
+      {:else}
+        <p class="side-note" aria-live="polite">
+          {saving || hasUnsavedChanges
+            ? 'Saving settings…'
+            : 'Settings are saved automatically.'}
+        </p>
+      {/if}
     </aside>
 
-    <div class="content">
+    <div class="content" inert={!loaded || isUpdating}>
+      {#if hookReady === false}
+        <p class="error-text" role="alert">
+          Window controls failed to start. Restart Glide and check its log if
+          the error persists.
+        </p>
+      {/if}
       {#if activeSection === 'general'}
         <section id="general" class="group">
           <h1 class="group-title">General</h1>
@@ -482,8 +529,7 @@
                   </Switch.Root>
                 </div>
                 <span class="row-desc"
-                  >Use the native Windows 11 snap layout instead of built-in
-                  snapping.</span
+                  >Release the modifier keys first to use native snap groups.</span
                 >
               </div>
               <div class="row-item-group">
@@ -518,6 +564,7 @@
                 <Switch.Root
                   class="toggle"
                   checked={autostartEnabled}
+                  disabled={changingAutostart}
                   onCheckedChange={toggleAutostart}
                   aria-label="Toggle autostart"
                 >
@@ -651,7 +698,13 @@
                   >{appVersion ? `v${appVersion}` : '—'}</span
                 >
               </div>
-              {#if updateAvailable !== null}
+              {#if storeBuild}
+                <p class="up-to-date-text">
+                  Updates are managed by Microsoft Store.
+                </p>
+              {:else if checkingUpdate}
+                <p class="up-to-date-text">Checking for updates…</p>
+              {:else if updateAvailable !== null}
                 <div class="row-item" style="margin-top: 7px;">
                   <span class="row-label">Latest version</span>
                   <span class="about-value about-new"
@@ -662,7 +715,10 @@
                   <button
                     class="update-btn"
                     onclick={installUpdate}
-                    disabled={isUpdating}
+                    disabled={isUpdating ||
+                      saving ||
+                      hasUnsavedChanges ||
+                      changingAutostart}
                   >
                     {isUpdating ? 'Installing...' : 'Update now'}
                   </button>
@@ -680,6 +736,9 @@
                 <p class="error-text">
                   Could not check for updates. Check your internet connection.
                 </p>
+                <button class="update-btn" onclick={checkForUpdate}
+                  >Retry update check</button
+                >
               {/if}
               {#if updateError}
                 <p class="error-text">{updateError}</p>
@@ -901,10 +960,6 @@
     letter-spacing: 0.1px;
   }
 
-  .group > .panel + .panel {
-    margin-top: 11px;
-  }
-
   .section-spacer {
     border: none;
     border-top: 1px solid var(--line);
@@ -1010,9 +1065,7 @@
   }
 
   .row-item + .row-item,
-  .row-item-group + .row-item-group,
-  .row-item-group + .row-item,
-  .row-item + .row-item-group {
+  .row-item-group + .row-item-group {
     margin-top: 7px;
   }
 

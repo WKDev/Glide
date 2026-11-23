@@ -1,0 +1,86 @@
+name: Microsoft Store MSIX
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Build Store executable
+        run: pnpm tauri build --ci --no-bundle
+        env:
+          GLIDE_STORE_BUILD: '1'
+
+      - name: Create MSIX package
+        shell: pwsh
+        env:
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $version              = (Get-Content package.json | ConvertFrom-Json).version
+          $msixVer              = "$version.0"
+          foreach ($setting in 'MSIX_PUBLISHER', 'MSIX_IDENTITY_NAME', 'MSIX_PUBLISHER_DISPLAY_NAME') {
+            if (-not [Environment]::GetEnvironmentVariable($setting)) {
+              throw "Set the repository variable $setting from Partner Center product identity."
+            }
+          }
+          $publisher = [Security.SecurityElement]::Escape($env:MSIX_PUBLISHER)
+          $identityName = [Security.SecurityElement]::Escape($env:MSIX_IDENTITY_NAME)
+          $publisherDisplayName = [Security.SecurityElement]::Escape($env:MSIX_PUBLISHER_DISPLAY_NAME)
+          $stagingDir = 'msix_staging'
+          $outDir     = 'src-tauri/target/release/bundle/msix'
+          $pkgName    = "Glide_${version}_x64.msix"
+
+          New-Item -ItemType Directory -Force -Path "$stagingDir/Assets" | Out-Null
+          New-Item -ItemType Directory -Force -Path $outDir             | Out-Null
+
+          Copy-Item 'src-tauri/target/release/glide.exe' "$stagingDir/"
+
+          @(
+            'Square30x30Logo.png',  'Square44x44Logo.png',  'Square71x71Logo.png',
+            'Square89x89Logo.png',  'Square107x107Logo.png', 'Square142x142Logo.png',
+            'Square150x150Logo.png', 'Square284x284Logo.png', 'Square310x310Logo.png',
+            'StoreLogo.png'
+          ) | ForEach-Object { Copy-Item "src-tauri/icons/$_" "$stagingDir/Assets/$_" }
+
+          $manifest = Get-Content '.github/AppxManifest.xml' -Raw
+          $manifest = $manifest.Replace('{{PUBLISHER}}', $publisher).Replace('{{VERSION}}', $msixVer)
+          $manifest = $manifest.Replace('{{IDENTITY_NAME}}', $identityName)
+          $manifest = $manifest.Replace('{{PUBLISHER_DISPLAY_NAME}}', $publisherDisplayName)
+          $manifest | Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
+
+          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+                    Where-Object  { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+                    Sort-Object   Name -Descending |
+                    Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sdkBin) { Write-Error 'Windows SDK not found'; exit 1 }
+          $env:Path += ";$sdkBin\x64"
+
+          Write-Host "SDK: $sdkBin"
+          makeappx.exe pack /v /o /d $stagingDir /p "$outDir/$pkgName"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "MSIX created: $outDir/$pkgName"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glide-store-msix
+          path: src-tauri/target/release/bundle/msix/*.msix
+          if-no-files-found: error

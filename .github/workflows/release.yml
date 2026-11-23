@@ -76,11 +76,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Lint & format check
         run: pnpm lint && pnpm format:check
@@ -125,68 +125,12 @@ jobs:
           prerelease: false
           updaterJsonPreferNsis: true
 
-      - name: Create MSIX package
-        shell: pwsh
-        env:
-          MSIX_PUBLISHER: ${{ secrets.MSIX_PUBLISHER }}
-          MSIX_IDENTITY_NAME: ${{ secrets.MSIX_IDENTITY_NAME }}
-          MSIX_PUBLISHER_DISPLAY_NAME: ${{ secrets.MSIX_PUBLISHER_DISPLAY_NAME }}
-        run: |
-          $version              = (Get-Content package.json | ConvertFrom-Json).version
-          $msixVer              = "$version.0"
-          $publisher            = if ($env:MSIX_PUBLISHER) { $env:MSIX_PUBLISHER } else { 'CN=Glide' }
-          $identityName         = if ($env:MSIX_IDENTITY_NAME) { $env:MSIX_IDENTITY_NAME } else { 'com.wkdev.glide' }
-          $publisherDisplayName = if ($env:MSIX_PUBLISHER_DISPLAY_NAME) { $env:MSIX_PUBLISHER_DISPLAY_NAME } else { 'wkdev' }
-          $stagingDir = 'msix_staging'
-          $outDir     = 'src-tauri/target/release/bundle/msix'
-          $pkgName    = "Glide_${version}_x64.msix"
-
-          New-Item -ItemType Directory -Force -Path "$stagingDir/Assets" | Out-Null
-          New-Item -ItemType Directory -Force -Path $outDir             | Out-Null
-
-          Copy-Item 'src-tauri/target/release/glide.exe' "$stagingDir/"
-
-          @(
-            'Square30x30Logo.png',  'Square44x44Logo.png',  'Square71x71Logo.png',
-            'Square89x89Logo.png',  'Square107x107Logo.png', 'Square142x142Logo.png',
-            'Square150x150Logo.png', 'Square284x284Logo.png', 'Square310x310Logo.png',
-            'StoreLogo.png'
-          ) | ForEach-Object { Copy-Item "src-tauri/icons/$_" "$stagingDir/Assets/$_" }
-
-          $manifest = Get-Content '.github/AppxManifest.xml' -Raw
-          $manifest = $manifest.Replace('{{PUBLISHER}}', $publisher).Replace('{{VERSION}}', $msixVer)
-          $manifest = $manifest.Replace('{{IDENTITY_NAME}}', $identityName)
-          $manifest = $manifest.Replace('{{PUBLISHER_DISPLAY_NAME}}', $publisherDisplayName)
-          $manifest | Set-Content "$stagingDir/AppxManifest.xml" -Encoding utf8NoBOM
-
-          $sdkBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
-                    Where-Object  { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-                    Sort-Object   Name -Descending |
-                    Select-Object -First 1 -ExpandProperty FullName
-          if (-not $sdkBin) { Write-Error 'Windows SDK not found'; exit 1 }
-          $env:Path += ";$sdkBin\x64"
-
-          Write-Host "SDK: $sdkBin"
-          makeappx.exe pack /v /o /d $stagingDir /p "$outDir/$pkgName"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host "MSIX created: $outDir/$pkgName"
-
-      - name: Upload MSIX to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          $pkg     = "src-tauri/target/release/bundle/msix/Glide_${version}_x64.msix"
-          gh release upload '${{ github.ref_name }}' $pkg --clobber
-
       - name: Generate checksums
         shell: pwsh
         run: |
           $dirs = @(
             "src-tauri/target/release/bundle/nsis",
-            "src-tauri/target/release/bundle/msi",
-            "src-tauri/target/release/bundle/msix"
+            "src-tauri/target/release/bundle/msi"
           )
 
           $sha256Lines = @()
@@ -195,7 +139,7 @@ jobs:
           foreach ($dir in $dirs) {
             if (Test-Path $dir) {
               Get-ChildItem $dir -File |
-                Where-Object { $_.Extension -in @('.exe', '.msi', '.msix') } |
+                Where-Object { $_.Extension -in @('.exe', '.msi') } |
                 ForEach-Object {
                   $sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
                   $md5    = (Get-FileHash $_.FullName -Algorithm MD5).Hash.ToLower()

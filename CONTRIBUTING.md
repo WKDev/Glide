@@ -30,8 +30,8 @@ We follow a standard fork → branch → pull request workflow:
 Before you begin, ensure you have the following installed:
 
 - **Rust toolchain** (stable) — [Install Rust](https://www.rust-lang.org/tools/install)
-- **Node.js 18+** — [Install Node.js](https://nodejs.org/)
-- **pnpm** — Install via `npm install -g pnpm`
+- **Node.js 24** — [Install Node.js](https://nodejs.org/)
+- **pnpm 9** — Install via `npm install -g pnpm@9`
 - **Windows OS** — Glide is a Windows-only application
 
 ### Installation
@@ -148,7 +148,7 @@ Happy contributing! 🚀
 
 ## Release & Signing
 
-Glide uses [Tauri's update signing](https://tauri.app/plugin/updater/) to verify update authenticity. Maintainers need a signing key pair to publish releases.
+The GitHub distribution uses [Tauri update signing](https://v2.tauri.app/plugin/updater/) to authenticate updates. The Microsoft Store distribution uses Store-managed signing and updates.
 
 ### Generating a Signing Key
 
@@ -172,7 +172,7 @@ In your GitHub repository settings, add the following secrets:
 
 ### Updating the Public Key
 
-Replace `UPDATER_PUBKEY_PLACEHOLDER` in `src-tauri/tauri.conf.json` with the full content of `~/.tauri/glide.key.pub`:
+The updater public key is stored in `src-tauri/tauri.conf.json`. Existing installations verify updates against the key embedded in their build, so plan any key rotation before changing it.
 
 ```json
 "plugins": {
@@ -183,10 +183,26 @@ Replace `UPDATER_PUBKEY_PLACEHOLDER` in `src-tauri/tauri.conf.json` with the ful
 }
 ```
 
-### Publishing a Release
+### GitHub release
 
-1. Create a GitHub Release and **publish it** (do not leave as draft)
-2. The release workflow will automatically build and attach the NSIS installer and `latest.json` update manifest
-3. Users running Glide will detect the update on next launch
+1. Set the intended version in `package.json` and update the changelog.
+2. Push the matching `v<version>` tag to run the release workflow.
+3. Check the published NSIS and MSI installers and the `latest.json` update manifest. From an older GitHub build, open Settings → About to check for the update. Verify that updating preserves existing settings.
 
-> ⚠️ **Important**: Draft releases are **not** detected by the auto-updater. You must publish the release for updates to be distributed.
+Tauri's update signature authenticates the download within Glide. Windows publisher trust for directly distributed installers uses Windows code signing.
+
+### Microsoft Store submission
+
+1. Reserve the product in Partner Center. In GitHub repository variables, set `MSIX_IDENTITY_NAME`, `MSIX_PUBLISHER`, and `MSIX_PUBLISHER_DISPLAY_NAME` to the corresponding values under the product identity.
+2. Run **Microsoft Store MSIX** in GitHub Actions for the intended ref. Download the `glide-store-msix` artifact and upload its MSIX in Partner Center.
+3. Validate the Store package, then test a fresh installation and an upgrade with the same package identity. Check the tray, startup toggle, settings persistence, window controls, and Store-managed updates on Windows.
+
+Microsoft signs and hosts the package after Store certification. If you sideload an MSIX for local testing, Windows must trust the certificate used to sign that package. [Microsoft Store signing overview](https://learn.microsoft.com/windows/apps/publish/faq/get-started-with-the-microsoft-store)
+
+### Windows smoke test
+
+- Try default move and resize, including release of the mouse button or modifier while the pointer is stationary. Holding just the modifier should leave windows alone.
+- Try edge and corner snaps on two monitors with different scales, including a maximized window and a background target. A shortcut during a drag should cancel the snap.
+- Verify whitelist and blacklist behavior for moving, resizing, and scrolling. Check that an excluded app still receives its normal wheel input.
+- Change settings while a previous write is in flight, then restart and verify the last value. Pause from the tray, save a setting, and verify the pause survives.
+- Exercise Windows 10 and 11, ordinary and elevated target windows, and the relevant installer or Store update path.

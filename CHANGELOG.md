@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Window move and resize require their configured modifiers and mouse button.
+- GitHub updates install from Settings on request. Store builds use Microsoft Store updates and the Windows startup task.
+- The tray can pause and resume window controls and reports a hook startup failure.
+
+### Fixed
+
+- Serialize settings saves and retain the latest edit if an earlier write is still in progress.
+- Finalize snapping when the button or modifier is released. Use direct placement when native snapping cannot safely target the grabbed window.
+- Apply the process and foreground filters to opacity scrolling and pass through rejected wheel input.
+
 ### Security
 
 - Bumped transitive dependencies to patch RustSec advisories: `rustls-webpki` 0.103.9 → 0.103.13 (RUSTSEC-2026-0049/0098/0099/0104) and `tar` 0.4.44 → 0.4.46 (RUSTSEC-2026-0067/0068)

@@ -20,6 +20,8 @@ use tauri_plugin_store::StoreExt;
 #[cfg(target_os = "windows")]
 use window_vibrancy::apply_mica;
 
+pub(crate) const STORE_BUILD: bool = option_env!("GLIDE_STORE_BUILD").is_some();
+
 pub fn run() {
     // Allow runtime log level override: GLIDE_LOG=debug ./glide
     // Valid values: error, warn, info, debug, trace (case-insensitive).
@@ -37,13 +39,16 @@ pub fn run() {
             ..Default::default()
         },
     ));
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if !STORE_BUILD {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -79,15 +84,11 @@ pub fn run() {
                 config: config.clone(),
             });
 
-            // Build system tray
-            build_tray(app)?;
-
-            // Spawn hook thread
-            let hook_config = config.clone();
             let enabled = config.lock().enabled;
             hook::set_enabled(enabled);
-            let hook_tid = hook::start_hook_thread(hook_config);
-            log::info!("setup complete — hook_tid={}", hook_tid);
+            let hook_ready = hook::start_hook_thread(config);
+            build_tray(app, enabled, hook_ready)?;
+            log::info!("setup complete — hook_ready={}", hook_ready);
 
             Ok(())
         })
@@ -102,14 +103,15 @@ pub fn run() {
             commands::get_config,
             commands::set_config,
             commands::get_running_processes,
-            commands::set_hook_enabled,
+            commands::get_app_status,
+            commands::store_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 fn load_config(app: &tauri::App) -> AppConfig {
-    match app.store("config.json") {
+    match app.store_builder("config.json").disable_auto_save().build() {
         Ok(store) => match store.get("config") {
             Some(val) => match serde_json::from_value(val.clone()) {
                 Ok(cfg) => cfg,
@@ -134,11 +136,18 @@ fn load_config(app: &tauri::App) -> AppConfig {
     }
 }
 
-fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn build_tray(
+    app: &tauri::App,
+    enabled: bool,
+    hook_ready: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let settings_i = MenuItemBuilder::with_id("settings", "Settings").build(app)?;
     let quit_i = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let toggle_i = MenuItemBuilder::with_id("toggle-hook", hook_menu_label(enabled, hook_ready))
+        .enabled(hook_ready)
+        .build(app)?;
     let menu = MenuBuilder::new(app)
-        .items(&[&settings_i, &quit_i])
+        .items(&[&settings_i, &toggle_i, &quit_i])
         .build()?;
 
     let icon = app
@@ -151,10 +160,16 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .tooltip("Glide")
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "settings" => {
                 show_main_window(app);
             }
+            "toggle-hook" => match commands::toggle_hook(app, app.state::<AppState>()) {
+                Ok(enabled) => {
+                    let _ = toggle_i.set_text(hook_menu_label(enabled, true));
+                }
+                Err(error) => log::error!("could not save tray toggle: {}", error),
+            },
             "quit" => {
                 // Signal the hook thread to run its cleanup sequence
                 // (UnhookWindowsHookEx, worker shutdown, overlay destroy).
@@ -188,6 +203,14 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(app)?;
 
     Ok(())
+}
+
+fn hook_menu_label(enabled: bool, ready: bool) -> &'static str {
+    match (ready, enabled) {
+        (false, _) => "Window controls unavailable",
+        (true, true) => "Pause window controls",
+        (true, false) => "Resume window controls",
+    }
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
