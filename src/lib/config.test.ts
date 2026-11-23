@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_CONFIG, MODIFIER_OPTIONS } from './config';
+import {
+  DEFAULT_CONFIG,
+  MODIFIER_OPTIONS,
+  orderCombo,
+  sameCombo,
+  toggleComboKey,
+} from './config';
 import type { AppConfig, ModifierKey, FilterMode, ResizeMode } from './config';
 
 describe('DEFAULT_CONFIG', () => {
@@ -8,9 +14,10 @@ describe('DEFAULT_CONFIG', () => {
       'enabled',
       'move_enabled',
       'resize_enabled',
-      'move_modifier',
-      'resize_modifier_1',
-      'resize_modifier_2',
+      'move_modifiers',
+      'move_trigger',
+      'resize_modifiers',
+      'resize_trigger',
       'resize_mode',
       'filter_mode',
       'filter_list',
@@ -34,12 +41,11 @@ describe('DEFAULT_CONFIG', () => {
   });
 
   it('uses Alt as the default move modifier', () => {
-    expect(DEFAULT_CONFIG.move_modifier).toBe('alt');
+    expect(DEFAULT_CONFIG.move_modifiers).toEqual(['alt']);
   });
 
   it('uses Alt+Shift as the default resize modifiers', () => {
-    expect(DEFAULT_CONFIG.resize_modifier_1).toBe('alt');
-    expect(DEFAULT_CONFIG.resize_modifier_2).toBe('shift');
+    expect(DEFAULT_CONFIG.resize_modifiers).toEqual(['alt', 'shift']);
   });
 
   it('defaults to blacklist filter mode', () => {
@@ -89,6 +95,7 @@ describe('DEFAULT_CONFIG', () => {
 
   it('uses quadrant resize mode by default', () => {
     expect(DEFAULT_CONFIG.resize_mode).toBe('quadrant');
+    expect(DEFAULT_CONFIG.move_trigger).toBe('click');
   });
   it('has a non-negative drag threshold', () => {
     expect(DEFAULT_CONFIG.drag_threshold).toBeGreaterThanOrEqual(0);
@@ -146,14 +153,45 @@ describe('type compatibility', () => {
 
   it('modifier types accept only valid values', () => {
     const modifiers: ModifierKey[] = ['alt', 'ctrl', 'shift', 'win'];
-    expect(modifiers).toContain(DEFAULT_CONFIG.move_modifier);
-    expect(modifiers).toContain(DEFAULT_CONFIG.resize_modifier_1);
-    expect(modifiers).toContain(DEFAULT_CONFIG.resize_modifier_2);
+    for (const key of [
+      ...DEFAULT_CONFIG.move_modifiers,
+      ...DEFAULT_CONFIG.resize_modifiers,
+    ]) {
+      expect(modifiers).toContain(key);
+    }
     expect(modifiers).toContain(DEFAULT_CONFIG.scroll_opacity_modifier);
   });
 
   it('resize_mode type accepts only valid values', () => {
     const modes: ResizeMode[] = ['quadrant', 'absolute'];
     expect(modes).toContain(DEFAULT_CONFIG.resize_mode);
+  });
+});
+
+describe('modifier combinations', () => {
+  it('adds keys in Windows shortcut order', () => {
+    expect(toggleComboKey(['shift'], 'ctrl')).toEqual(['ctrl', 'shift']);
+    expect(orderCombo(['shift', 'win', 'alt'])).toEqual([
+      'win',
+      'alt',
+      'shift',
+    ]);
+  });
+
+  it('keeps at least one key', () => {
+    expect(toggleComboKey(['alt'], 'alt')).toEqual(['alt']);
+  });
+
+  it('allows at most three keys', () => {
+    expect(toggleComboKey(['ctrl', 'alt', 'shift'], 'win')).toEqual([
+      'ctrl',
+      'alt',
+      'shift',
+    ]);
+  });
+
+  it('compares combinations regardless of order', () => {
+    expect(sameCombo(['alt', 'shift'], ['shift', 'alt'])).toBe(true);
+    expect(sameCombo(['alt'], ['alt', 'shift'])).toBe(false);
   });
 });

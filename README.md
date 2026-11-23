@@ -18,7 +18,7 @@ A modifier key + mouse window move/resize utility for Windows. Hold a modifier k
 
 - **Window Moving**: Hold Alt + left-click and drag to move any window
 - **Window Resizing**: Hold Alt+Shift + right-click and drag to resize any window
-- **Configurable Modifiers**: Customize which modifier keys trigger move and resize actions (Alt, Ctrl, Shift, Win)
+- **Configurable Gestures**: Pick one to three modifier keys (Alt, Ctrl, Shift, Win) for move and resize, and choose whether each starts with a click-and-drag or just by moving the mouse
 - **Process Filtering**: Whitelist or blacklist specific applications from using the utility
 - **Auto-start**: Optionally launch Glide automatically when you sign in to Windows
 - **Window Snapping**: Snap windows to grid positions with configurable threshold
@@ -51,9 +51,10 @@ Access settings by clicking the Glide icon in your system tray. The following op
 
 | Option                | Description                                    | Default        |
 | --------------------- | ---------------------------------------------- | -------------- |
-| `move_modifier`       | Modifier key for moving windows                | Alt            |
-| `resize_modifier_1`   | First modifier for resizing                    | Alt            |
-| `resize_modifier_2`   | Second modifier for resizing                   | Shift          |
+| `move_modifiers`      | One to three keys for moving windows           | Alt            |
+| `move_trigger`        | `click` (drag) or `pan` (just move the mouse)  | click          |
+| `resize_modifiers`    | One to three keys for resizing windows         | Alt, Shift     |
+| `resize_trigger`      | `click` (drag) or `pan` (just move the mouse)  | click          |
 | `filter_mode`         | Process filtering mode (whitelist/blacklist)   | Blacklist      |
 | `autostart`           | Launch on Windows startup                      | Off            |
 | `allow_nonforeground` | Allow move/resize on non-foreground windows    | On             |

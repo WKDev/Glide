@@ -3,11 +3,44 @@
   import { Switch, RadioGroup, Select } from 'bits-ui';
   import { invoke } from '@tauri-apps/api/core';
   import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
-  import type { AppConfig } from '../lib/config';
-  import { MODIFIER_OPTIONS, DEFAULT_CONFIG } from '../lib/config';
+  import type { AppConfig, GestureTrigger, ModifierKey } from '../lib/config';
+  import {
+    DEFAULT_CONFIG,
+    modifierLabel,
+    orderCombo,
+    sameCombo,
+  } from '../lib/config';
+  import Keycaps from '../lib/components/Keycaps.svelte';
+  import MouseGlyph from '../lib/components/MouseGlyph.svelte';
+  import SupportDialog from '../lib/components/SupportDialog.svelte';
   import { check } from '@tauri-apps/plugin-updater';
   import { getVersion } from '@tauri-apps/api/app';
   import { relaunch } from '@tauri-apps/plugin-process';
+
+  type Section = 'gestures' | 'behavior' | 'apps' | 'about';
+
+  /** Segoe Fluent Icons code points. */
+  const GLYPH = {
+    error: '\uEA39',
+    warning: '\uE7BA',
+    move: '\uE7C2',
+    resize: '\uE740',
+    opacity: '\uE790',
+    add: '\uE710',
+    chevron: '\uE70D',
+    refresh: '\uE72C',
+    app: '\uE737',
+    remove: '\uE711',
+    heart: '\uEB52',
+    external: '\uE8A7',
+  };
+
+  const SECTIONS: { id: Section; label: string; glyph: string }[] = [
+    { id: 'gestures', label: 'Gestures', glyph: '\uE962' },
+    { id: 'behavior', label: 'Behavior', glyph: '\uE713' },
+    { id: 'apps', label: 'Apps', glyph: '\uE71D' },
+    { id: 'about', label: 'About', glyph: '\uE946' },
+  ];
 
   let appVersion = $state('');
 
@@ -25,11 +58,19 @@
   let autostartError = $state<string | null>(null);
   let updateError = $state<string | null>(null);
   let updateCheckFailed = $state(false);
-  let activeSection = $state<'general' | 'process-filter' | 'about'>('general');
+  let activeSection = $state<Section>('gestures');
   let lastSavedSnapshot = $state('');
   let saving = $state(false);
   let failedSnapshot = $state<string | null>(null);
   let loadError = $state(false);
+  let heldKeys = $state<ModifierKey[]>([]);
+  let supporter = $state<string | null>(null);
+  let supportPrompt = $state(false);
+  let supportCode = $state('');
+  let redeeming = $state(false);
+  let redeemError = $state<string | null>(null);
+  let linkError = $state<string | null>(null);
+  let codeInput = $state<globalThis.HTMLInputElement>();
   const snapshot = $derived(JSON.stringify(config));
   const hasUnsavedChanges = $derived(loaded && snapshot !== lastSavedSnapshot);
 
@@ -67,30 +108,83 @@
     }
 
     void loadRunning();
+    void loadSupport();
     appVersion = await getVersion().catch(() => '');
     await getStatus;
   });
 
-  const moveLabel = $derived(
-    MODIFIER_OPTIONS.find((o) => o.value === config.move_modifier)?.label ??
-      config.move_modifier
+  // ---- Held-key preview: keycaps press down while the user holds them. ----
+  const KEY_NAMES: Record<string, ModifierKey> = {
+    Control: 'ctrl',
+    Alt: 'alt',
+    Shift: 'shift',
+    Meta: 'win',
+    OS: 'win',
+  };
+
+  function readHeld(event: globalThis.KeyboardEvent) {
+    const next: ModifierKey[] = [];
+    if (event.metaKey) next.push('win');
+    if (event.ctrlKey) next.push('ctrl');
+    if (event.altKey) next.push('alt');
+    if (event.shiftKey) next.push('shift');
+    const own = KEY_NAMES[event.key];
+    if (own && event.type === 'keydown' && !next.includes(own)) next.push(own);
+    if (own && event.type === 'keyup') {
+      heldKeys = orderCombo(next.filter((k) => k !== own));
+    } else {
+      heldKeys = orderCombo(next);
+    }
+    // Alt alone would otherwise move focus to the (absent) menu bar.
+    if (event.key === 'Alt') event.preventDefault();
+  }
+
+  // ---- Gesture wording ----
+  const comboText = (keys: ModifierKey[]) =>
+    keys.map(modifierLabel).join(' + ');
+
+  function recipe(trigger: GestureTrigger, button: 'left' | 'right') {
+    if (trigger === 'pan') return 'then move the mouse';
+    return button === 'left'
+      ? 'then left-click and drag'
+      : 'then right-click and drag';
+  }
+
+  const moveReady = $derived(
+    config.move_enabled && sameCombo(heldKeys, config.move_modifiers)
   );
-  const resizeLabel1 = $derived(
-    MODIFIER_OPTIONS.find((o) => o.value === config.resize_modifier_1)?.label ??
-      config.resize_modifier_1
+  const resizeReady = $derived(
+    config.resize_enabled && sameCombo(heldKeys, config.resize_modifiers)
   );
-  const resizeLabel2 = $derived(
-    MODIFIER_OPTIONS.find((o) => o.value === config.resize_modifier_2)?.label ??
-      config.resize_modifier_2
-  );
-  const scrollOpacityLabel = $derived(
-    MODIFIER_OPTIONS.find((o) => o.value === config.scroll_opacity_modifier)
-      ?.label ?? config.scroll_opacity_modifier
-  );
+
+  // ---- Conflicts: surfaced, never silent ----
+  const conflict = $derived.by(() => {
+    if (!config.move_enabled || !config.resize_enabled) return null;
+    if (!sameCombo(config.move_modifiers, config.resize_modifiers)) return null;
+    const keys = comboText(config.move_modifiers);
+    const m = config.move_trigger;
+    const r = config.resize_trigger;
+    if (m === 'click' && r === 'click') return null;
+    if (m === 'pan' && r === 'pan') {
+      return `Move and Resize both use ${keys} with “Just move”. Holding ${keys} will always move the window, so Resize never starts. Change one of the key sets.`;
+    }
+    const panner = m === 'pan' ? 'Move' : 'Resize';
+    const clicker = m === 'pan' ? 'Resize' : 'Move';
+    return `${panner} starts as soon as the mouse moves with ${keys} held, so ${clicker} rarely gets a chance. Use different keys for one of them.`;
+  });
+
+  function panNote(keys: ModifierKey[], trigger: GestureTrigger) {
+    if (trigger !== 'pan' || keys.length !== 1) return null;
+    if (keys[0] === 'ctrl' || keys[0] === 'shift') {
+      return `Many apps use ${modifierLabel(keys[0])} while moving the mouse. Adding a second key avoids moving windows by accident.`;
+    }
+    return null;
+  }
+
   const filterHint = $derived(
     config.filter_mode === 'whitelist'
-      ? 'Only affects listed processes'
-      : 'Affects all processes except listed'
+      ? 'Glide works only in the apps listed below.'
+      : 'Glide works everywhere except the apps listed below.'
   );
 
   const selectableRunningProcesses = $derived(
@@ -193,6 +287,71 @@
     }
   }
 
+  // ---- Support ----
+  type LinkTarget = 'sponsors' | 'coffee' | 'author' | 'repo';
+
+  async function loadSupport() {
+    try {
+      const status = await invoke<{
+        supporter: string | null;
+        prompt: boolean;
+      }>('get_support_status');
+      supporter = status.supporter;
+      supportPrompt = status.prompt;
+    } catch (error) {
+      console.error('Failed to read support status:', error);
+    }
+  }
+
+  async function openLink(target: LinkTarget) {
+    linkError = null;
+    try {
+      await invoke('open_link', { target });
+    } catch (error) {
+      console.error('Could not open link:', error);
+      linkError = 'Could not open your browser.';
+    }
+  }
+
+  async function answerPrompt(choice: 'donate' | 'later') {
+    supportPrompt = false;
+    try {
+      await invoke('answer_support_prompt', { choice });
+    } catch (error) {
+      console.error('Could not save support choice:', error);
+    }
+  }
+
+  function donateFromPrompt(target: 'sponsors' | 'coffee') {
+    void openLink(target);
+    void answerPrompt('donate');
+  }
+
+  function enterCodeFromPrompt() {
+    // Closing for a code is not a decision; the prompt returns until it is redeemed.
+    supportPrompt = false;
+    activeSection = 'about';
+    globalThis.requestAnimationFrame(() => codeInput?.focus());
+  }
+
+  async function redeemCode(event: globalThis.SubmitEvent) {
+    event.preventDefault();
+    if (redeeming || !supportCode.trim()) return;
+    redeeming = true;
+    redeemError = null;
+    try {
+      supporter = await invoke<string>('redeem_supporter_code', {
+        code: supportCode,
+      });
+      supportCode = '';
+    } catch (error) {
+      redeemError =
+        typeof error === 'string' ? error : 'Could not check the code.';
+    } finally {
+      redeeming = false;
+    }
+  }
+
   async function saveSettings(sentSnapshot: string) {
     saving = true;
     try {
@@ -217,538 +376,664 @@
   });
 </script>
 
+<svelte:window
+  onkeydown={readHeld}
+  onkeyup={readHeld}
+  onblur={() => (heldKeys = [])}
+/>
+
+{#snippet keyChips(keys: ModifierKey[])}
+  {#each keys as key, i (key)}
+    {#if i > 0}<span class="plus" aria-hidden="true">+</span>{/if}
+    <kbd>{modifierLabel(key)}</kbd>
+  {/each}
+{/snippet}
+
+{#snippet triggerPicker(
+  value: GestureTrigger,
+  onChange: (v: GestureTrigger) => void,
+  button: 'left' | 'right',
+  disabled: boolean,
+  label: string
+)}
+  <RadioGroup.Root
+    class="segmented"
+    {value}
+    onValueChange={(v) => onChange(v as GestureTrigger)}
+    {disabled}
+    aria-label={label}
+  >
+    <RadioGroup.Item class="segment" value="click">
+      <MouseGlyph action={button} />
+      {button === 'left' ? 'Click and drag' : 'Right-click and drag'}
+    </RadioGroup.Item>
+    <RadioGroup.Item class="segment" value="pan">
+      <MouseGlyph action="move" />
+      Just move
+    </RadioGroup.Item>
+  </RadioGroup.Root>
+{/snippet}
+
 <main class:loaded>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="side-brand">
-        <span class="side-brand-name">Glide</span>
-        <span class="side-brand-ver">{appVersion ? `v${appVersion}` : ''}</span>
+  <aside class="nav-pane">
+    <div class="brand">
+      <img class="brand-mark" src="/glide-mark.png" alt="" />
+      <div class="brand-text">
+        <span class="brand-name">Glide</span>
+        {#if supporter}
+          <span
+            class="brand-sub supporter-badge"
+            title="Thank you, {supporter}"
+          >
+            <span class="glyph" aria-hidden="true">{GLYPH.heart}</span>
+            Supporter
+          </span>
+        {:else}
+          <span class="brand-sub">Settings</span>
+        {/if}
       </div>
-      <nav class="side-nav" aria-label="Settings sections">
+    </div>
+
+    <nav aria-label="Settings sections">
+      {#each SECTIONS as s (s.id)}
         <button
           type="button"
-          class="side-link"
-          class:active={activeSection === 'general'}
-          onclick={() => (activeSection = 'general')}
+          class="nav-item"
+          class:active={activeSection === s.id}
+          aria-current={activeSection === s.id ? 'page' : undefined}
+          onclick={() => (activeSection = s.id)}
         >
-          General
+          <span class="glyph" aria-hidden="true">{s.glyph}</span>
+          {s.label}
         </button>
-        <button
-          type="button"
-          class="side-link"
-          class:active={activeSection === 'process-filter'}
-          onclick={() => (activeSection = 'process-filter')}
-        >
-          Process Filter
-        </button>
-        <button
-          type="button"
-          class="side-link"
-          class:active={activeSection === 'about'}
-          onclick={() => (activeSection = 'about')}
-        >
-          About
-        </button>
-      </nav>
+      {/each}
+    </nav>
+
+    <div class="save-state" aria-live="polite">
       {#if loadError}
-        <p class="side-note error-text" role="alert">
-          Could not load settings. Restart Glide to retry.
+        <p class="error-text" role="alert">
+          Could not load settings. Restart Glide to try again.
         </p>
       {:else if failedSnapshot === snapshot && hasUnsavedChanges}
-        <p class="side-note error-text" role="alert">
-          Could not save settings.
-        </p>
-        <button class="update-btn" onclick={() => (failedSnapshot = null)}
-          >Retry save</button
+        <p class="error-text" role="alert">Could not save settings.</p>
+        <button class="button" onclick={() => (failedSnapshot = null)}
+          >Try again</button
         >
       {:else}
-        <p class="side-note" aria-live="polite">
+        <p class="caption">
+          <span class="dot" class:busy={saving || hasUnsavedChanges}></span>
           {saving || hasUnsavedChanges
-            ? 'Saving settings…'
-            : 'Settings are saved automatically.'}
+            ? 'Saving…'
+            : 'Changes save automatically'}
         </p>
-      {/if}
-    </aside>
-
-    <div class="content" inert={!loaded || isUpdating}>
-      {#if hookReady === false}
-        <p class="error-text" role="alert">
-          Window controls failed to start. Restart Glide and check its log if
-          the error persists.
-        </p>
-      {/if}
-      {#if activeSection === 'general'}
-        <section id="general" class="group">
-          <h1 class="group-title">General</h1>
-
-          <div class="panel">
-            <h2 class="panel-title">Modifier Keys</h2>
-            <section class="card">
-              <div class="mod-group">
-                <div class="mod-row">
-                  <div
-                    class="mod-main"
-                    class:row-disabled={!config.move_enabled}
-                  >
-                    <span class="mod-label">Move</span>
-                    <Select.Root
-                      type="single"
-                      bind:value={config.move_modifier}
-                      disabled={!config.move_enabled}
-                    >
-                      <Select.Trigger
-                        class="select-trigger"
-                        aria-label="Move modifier"
-                      >
-                        <span class="select-value">{moveLabel}</span>
-                        <span class="select-caret">▾</span>
-                      </Select.Trigger>
-                      <Select.Content class="select-content" sideOffset={4}>
-                        {#each MODIFIER_OPTIONS as opt (opt.value)}
-                          <Select.Item
-                            class="select-item"
-                            value={opt.value}
-                            label={opt.label}>{opt.label}</Select.Item
-                          >
-                        {/each}
-                      </Select.Content>
-                    </Select.Root>
-                  </div>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.move_enabled}
-                    aria-label="Toggle move feature"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="mod-desc" class:row-disabled={!config.move_enabled}
-                  >Hold <kbd>{moveLabel}</kbd> + left-click drag to move windows</span
-                >
-              </div>
-              <div class="mod-group">
-                <div class="mod-row">
-                  <div
-                    class="mod-main"
-                    class:row-disabled={!config.resize_enabled}
-                  >
-                    <span class="mod-label">Resize</span>
-                    <div class="resize-pair">
-                      <Select.Root
-                        type="single"
-                        bind:value={config.resize_modifier_1}
-                        disabled={!config.resize_enabled}
-                      >
-                        <Select.Trigger
-                          class="select-trigger"
-                          aria-label="Resize modifier one"
-                        >
-                          <span class="select-value">{resizeLabel1}</span>
-                          <span class="select-caret">▾</span>
-                        </Select.Trigger>
-                        <Select.Content class="select-content" sideOffset={4}>
-                          {#each MODIFIER_OPTIONS as opt (opt.value)}
-                            <Select.Item
-                              class="select-item"
-                              value={opt.value}
-                              label={opt.label}>{opt.label}</Select.Item
-                            >
-                          {/each}
-                        </Select.Content>
-                      </Select.Root>
-                      <span class="plus">+</span>
-                      <Select.Root
-                        type="single"
-                        bind:value={config.resize_modifier_2}
-                        disabled={!config.resize_enabled}
-                      >
-                        <Select.Trigger
-                          class="select-trigger"
-                          aria-label="Resize modifier two"
-                        >
-                          <span class="select-value">{resizeLabel2}</span>
-                          <span class="select-caret">▾</span>
-                        </Select.Trigger>
-                        <Select.Content class="select-content" sideOffset={4}>
-                          {#each MODIFIER_OPTIONS as opt (opt.value)}
-                            <Select.Item
-                              class="select-item"
-                              value={opt.value}
-                              label={opt.label}>{opt.label}</Select.Item
-                            >
-                          {/each}
-                        </Select.Content>
-                      </Select.Root>
-                    </div>
-                  </div>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.resize_enabled}
-                    aria-label="Toggle resize feature"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span
-                  class="mod-desc"
-                  class:row-disabled={!config.resize_enabled}
-                  >Hold <kbd>{resizeLabel1}</kbd>+<kbd>{resizeLabel2}</kbd> + right-click
-                  drag to resize</span
-                >
-              </div>
-              <div
-                class="row-item-group"
-                class:row-disabled={!config.resize_enabled}
-              >
-                <div class="row-item">
-                  <span class="row-label">Resize from nearest corner</span>
-                  <Switch.Root
-                    class="toggle"
-                    checked={config.resize_mode === 'quadrant'}
-                    onCheckedChange={(v) =>
-                      (config.resize_mode = v ? 'quadrant' : 'absolute')}
-                    disabled={!config.resize_enabled}
-                    aria-label="Toggle resize from nearest corner"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >When on, resize direction depends on cursor position. When
-                  off, the window always grows toward the cursor direction.</span
-                >
-              </div>
-
-              <hr class="panel-divider" />
-
-              <div class="mod-group">
-                <div class="mod-row">
-                  <span class="mod-label">Opacity</span>
-                  <Select.Root
-                    type="single"
-                    bind:value={config.scroll_opacity_modifier}
-                  >
-                    <Select.Trigger
-                      class="select-trigger"
-                      aria-label="Scroll opacity modifier"
-                    >
-                      <span class="select-value">{scrollOpacityLabel}</span>
-                      <span class="select-caret">▾</span>
-                    </Select.Trigger>
-                    <Select.Content class="select-content" sideOffset={4}>
-                      {#each MODIFIER_OPTIONS as opt (opt.value)}
-                        <Select.Item
-                          class="select-item"
-                          value={opt.value}
-                          label={opt.label}>{opt.label}</Select.Item
-                        >
-                      {/each}
-                    </Select.Content>
-                  </Select.Root>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.scroll_opacity}
-                    aria-label="Toggle scroll opacity"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="mod-desc"
-                  >Hold <kbd>{scrollOpacityLabel}</kbd> + scroll to adjust window
-                  transparency</span
-                >
-              </div>
-            </section>
-          </div>
-
-          <hr class="section-spacer" />
-
-          <div class="panel">
-            <h2 class="panel-title">Behavior</h2>
-            <section class="card">
-              <div class="row-item-group">
-                <div class="row-item">
-                  <span class="row-label">Allow non-foreground windows</span>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.allow_nonforeground}
-                    aria-label="Toggle allow non-foreground windows"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >Move or resize windows even when they are behind other
-                  windows.</span
-                >
-              </div>
-              <div class="row-item-group">
-                <div class="row-item">
-                  <span class="row-label">Raise window on grab</span>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.raise_on_grab}
-                    aria-label="Toggle raise window on grab"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >Bring the window to the foreground when you start dragging
-                  it.</span
-                >
-              </div>
-              <div class="row-item-group">
-                <div class="row-item">
-                  <span class="row-label">Edge snapping</span>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.snap_enabled}
-                    aria-label="Toggle edge snapping"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >Snap windows to screen edges when dragging near them.</span
-                >
-              </div>
-              <div
-                class="row-item-group"
-                class:row-disabled={!config.snap_enabled}
-              >
-                <div class="row-item">
-                  <span class="row-label">Use Windows 11 snap groups</span>
-                  <Switch.Root
-                    class="toggle"
-                    bind:checked={config.snap_native}
-                    disabled={!config.snap_enabled}
-                    aria-label="Toggle Windows 11 snap groups"
-                  >
-                    <Switch.Thumb class="thumb" />
-                  </Switch.Root>
-                </div>
-                <span class="row-desc"
-                  >Release the modifier keys first to use native snap groups.</span
-                >
-              </div>
-              <div class="row-item-group">
-                <div class="row-item">
-                  <span class="row-label">Drag threshold</span>
-                  <div class="slider-group">
-                    <input
-                      type="range"
-                      class="slider"
-                      min="0"
-                      max="200"
-                      bind:value={config.drag_threshold}
-                      aria-label="Drag threshold in pixels"
-                    />
-                    <span class="slider-value">{config.drag_threshold}px</span>
-                  </div>
-                </div>
-                <span class="row-desc"
-                  >Minimum pixel distance before a drag operation starts.</span
-                >
-              </div>
-            </section>
-          </div>
-
-          <hr class="section-spacer" />
-
-          <div class="panel">
-            <h2 class="panel-title">Autostart</h2>
-            <section class="card">
-              <div class="row-item">
-                <span class="row-label">Start with Windows</span>
-                <Switch.Root
-                  class="toggle"
-                  checked={autostartEnabled}
-                  disabled={changingAutostart}
-                  onCheckedChange={toggleAutostart}
-                  aria-label="Toggle autostart"
-                >
-                  <Switch.Thumb class="thumb" />
-                </Switch.Root>
-              </div>
-              {#if autostartError}
-                <p class="error-text">{autostartError}</p>
-              {/if}
-            </section>
-          </div>
-        </section>
-      {/if}
-
-      {#if activeSection === 'process-filter'}
-        <section id="process-filter" class="group">
-          <h1 class="group-title">Process Filter</h1>
-          <div class="panel">
-            <h2 class="panel-title">Rules</h2>
-            <section class="card">
-              <div class="filter-top">
-                <RadioGroup.Root
-                  class="radio-tabs"
-                  bind:value={config.filter_mode}
-                >
-                  <RadioGroup.Item class="rtab" value="whitelist"
-                    >Whitelist</RadioGroup.Item
-                  >
-                  <RadioGroup.Item class="rtab" value="blacklist"
-                    >Blacklist</RadioGroup.Item
-                  >
-                </RadioGroup.Root>
-                <span class="filter-hint">{filterHint}</span>
-              </div>
-
-              <div class="process-picker-row">
-                <Select.Root
-                  type="single"
-                  bind:value={runningProcessValue}
-                  items={selectableRunningProcessItems}
-                  onValueChange={onRunningProcessSelect}
-                >
-                  <Select.Trigger
-                    class="select-trigger process-select"
-                    aria-label="Select running process"
-                  >
-                    <span class="select-value"
-                      >{runningProcessValue || 'Select running process'}</span
-                    >
-                    <span class="select-caret">▾</span>
-                  </Select.Trigger>
-                  <Select.Content class="select-content" sideOffset={4}>
-                    {#if selectableRunningProcesses.length === 0}
-                      <div class="running-empty">
-                        No running process available
-                      </div>
-                    {:else}
-                      {#each selectableRunningProcesses as proc (proc)}
-                        <Select.Item
-                          class="select-item"
-                          value={proc}
-                          label={proc}>{proc}</Select.Item
-                        >
-                      {/each}
-                    {/if}
-                  </Select.Content>
-                </Select.Root>
-                <button
-                  type="button"
-                  class="refresh-running-btn"
-                  onclick={loadRunning}>Refresh</button
-                >
-              </div>
-
-              <div class="pill-list">
-                {#each config.filter_list as proc (proc)}
-                  <span class="pill">
-                    {proc}
-                    <button
-                      type="button"
-                      class="pill-x"
-                      onclick={() => removeProcess(proc)}
-                      aria-label="Remove {proc}">×</button
-                    >
-                  </span>
-                {/each}
-                {#if config.filter_list.length === 0}
-                  <span class="pill-empty">No processes listed</span>
-                {/if}
-              </div>
-              {#if config.filter_mode === 'whitelist' && config.filter_list.length === 0}
-                <div class="whitelist-warning">
-                  <span class="warning-icon">⚠</span>
-                  <span
-                    >Whitelist is active but no processes are listed. Glide will
-                    not work on any window.</span
-                  >
-                </div>
-              {/if}
-              {#if config.filter_mode === 'blacklist' && config.filter_list.length === 0}
-                <div class="blacklist-info">
-                  <span class="info-icon">ℹ</span>
-                  <span
-                    >No processes are excluded. Glide will work on all windows.</span
-                  >
-                </div>
-              {/if}
-            </section>
-          </div>
-        </section>
-      {/if}
-
-      {#if activeSection === 'about'}
-        <section id="about" class="group">
-          <h1 class="group-title">About</h1>
-          <div class="panel">
-            <h2 class="panel-title">Glide</h2>
-            <section class="card about-card">
-              <p>Keyboard-assisted window move/resize utility for Windows.</p>
-            </section>
-          </div>
-
-          <hr class="section-spacer" />
-
-          <div class="panel">
-            <h2 class="panel-title">Update</h2>
-            <section class="card">
-              <div class="row-item">
-                <span class="row-label">Current version</span>
-                <span class="about-value"
-                  >{appVersion ? `v${appVersion}` : '—'}</span
-                >
-              </div>
-              {#if storeBuild}
-                <p class="up-to-date-text">
-                  Updates are managed by Microsoft Store.
-                </p>
-              {:else if checkingUpdate}
-                <p class="up-to-date-text">Checking for updates…</p>
-              {:else if updateAvailable !== null}
-                <div class="row-item" style="margin-top: 7px;">
-                  <span class="row-label">Latest version</span>
-                  <span class="about-value about-new"
-                    >v{updateAvailable.version}</span
-                  >
-                </div>
-                <div class="update-action" style="margin-top: 10px;">
-                  <button
-                    class="update-btn"
-                    onclick={installUpdate}
-                    disabled={isUpdating ||
-                      saving ||
-                      hasUnsavedChanges ||
-                      changingAutostart}
-                  >
-                    {isUpdating ? 'Installing...' : 'Update now'}
-                  </button>
-                </div>
-              {:else if !updateCheckFailed}
-                <div class="row-item" style="margin-top: 7px;">
-                  <span class="row-label">Latest version</span>
-                  <span class="about-value"
-                    >{appVersion ? `v${appVersion}` : '—'}</span
-                  >
-                </div>
-                <p class="up-to-date-text">You're up to date.</p>
-              {/if}
-              {#if updateCheckFailed}
-                <p class="error-text">
-                  Could not check for updates. Check your internet connection.
-                </p>
-                <button class="update-btn" onclick={checkForUpdate}
-                  >Retry update check</button
-                >
-              {/if}
-              {#if updateError}
-                <p class="error-text">{updateError}</p>
-              {/if}
-            </section>
-          </div>
-        </section>
       {/if}
     </div>
+  </aside>
+
+  <div class="page" inert={!loaded || isUpdating}>
+    {#if hookReady === false}
+      <div class="infobar error" role="alert">
+        <span class="glyph" aria-hidden="true">{GLYPH.error}</span>
+        <p>
+          Window controls failed to start. Restart Glide, and check its log if
+          this keeps happening.
+        </p>
+      </div>
+    {/if}
+
+    {#if activeSection === 'gestures'}
+      <h1>Gestures</h1>
+      <p class="lede">
+        Hold the keys, then use the mouse anywhere on a window. Try a
+        combination here: the keys light up as you hold them.
+      </p>
+
+      {#if conflict}
+        <div class="infobar warning" role="alert">
+          <span class="glyph" aria-hidden="true">{GLYPH.warning}</span>
+          <p>{conflict}</p>
+        </div>
+      {/if}
+
+      <section class="card gesture" class:off={!config.move_enabled}>
+        <header class="card-head">
+          <span class="card-icon glyph" aria-hidden="true">{GLYPH.move}</span>
+          <div class="card-title">
+            <h2>Move windows</h2>
+            <p class="recipe" class:ready={moveReady}>
+              {#if moveReady}
+                Keys held. Now {config.move_trigger === 'pan'
+                  ? 'move the mouse'
+                  : 'click and drag'}.
+              {:else}
+                Hold {@render keyChips(config.move_modifiers)}
+                {recipe(config.move_trigger, 'left')}
+              {/if}
+            </p>
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.move_enabled}
+            aria-label="Move windows"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </header>
+        <div class="card-body" inert={!config.move_enabled}>
+          <div class="field">
+            <span class="field-label">Keys <em>pick 1 to 3</em></span>
+            <Keycaps
+              bind:value={config.move_modifiers}
+              held={heldKeys}
+              label="Keys for moving windows"
+            />
+          </div>
+          <div class="field">
+            <span class="field-label">Mouse</span>
+            {@render triggerPicker(
+              config.move_trigger,
+              (v) => (config.move_trigger = v),
+              'left',
+              !config.move_enabled,
+              'Mouse action for moving windows'
+            )}
+          </div>
+          {#if panNote(config.move_modifiers, config.move_trigger)}
+            <p class="note">
+              {panNote(config.move_modifiers, config.move_trigger)}
+            </p>
+          {/if}
+        </div>
+      </section>
+
+      <section class="card gesture" class:off={!config.resize_enabled}>
+        <header class="card-head">
+          <span class="card-icon glyph" aria-hidden="true">{GLYPH.resize}</span>
+          <div class="card-title">
+            <h2>Resize windows</h2>
+            <p class="recipe" class:ready={resizeReady}>
+              {#if resizeReady}
+                Keys held. Now {config.resize_trigger === 'pan'
+                  ? 'move the mouse'
+                  : 'right-click and drag'}.
+              {:else}
+                Hold {@render keyChips(config.resize_modifiers)}
+                {recipe(config.resize_trigger, 'right')}
+              {/if}
+            </p>
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.resize_enabled}
+            aria-label="Resize windows"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </header>
+        <div class="card-body" inert={!config.resize_enabled}>
+          <div class="field">
+            <span class="field-label">Keys <em>pick 1 to 3</em></span>
+            <Keycaps
+              bind:value={config.resize_modifiers}
+              held={heldKeys}
+              label="Keys for resizing windows"
+            />
+          </div>
+          <div class="field">
+            <span class="field-label">Mouse</span>
+            {@render triggerPicker(
+              config.resize_trigger,
+              (v) => (config.resize_trigger = v),
+              'right',
+              !config.resize_enabled,
+              'Mouse action for resizing windows'
+            )}
+          </div>
+          {#if panNote(config.resize_modifiers, config.resize_trigger)}
+            <p class="note">
+              {panNote(config.resize_modifiers, config.resize_trigger)}
+            </p>
+          {/if}
+          <div class="row nested">
+            <div class="row-text">
+              <span class="row-label">Resize from the nearest corner</span>
+              <span class="row-desc"
+                >Off: the bottom-right corner always follows the mouse.</span
+              >
+            </div>
+            <Switch.Root
+              class="toggle"
+              checked={config.resize_mode === 'quadrant'}
+              onCheckedChange={(v) =>
+                (config.resize_mode = v ? 'quadrant' : 'absolute')}
+              aria-label="Resize from the nearest corner"
+            >
+              <Switch.Thumb class="thumb" />
+            </Switch.Root>
+          </div>
+        </div>
+      </section>
+
+      <section class="card gesture" class:off={!config.scroll_opacity}>
+        <header class="card-head">
+          <span class="card-icon glyph" aria-hidden="true">{GLYPH.opacity}</span
+          >
+          <div class="card-title">
+            <h2>Change transparency</h2>
+            <p class="recipe">
+              Hold <kbd>{modifierLabel(config.scroll_opacity_modifier)}</kbd>
+              then scroll the wheel
+            </p>
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.scroll_opacity}
+            aria-label="Change transparency"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </header>
+        <div class="card-body" inert={!config.scroll_opacity}>
+          <div class="field">
+            <span class="field-label">Key</span>
+            <Keycaps
+              single
+              bind:value={
+                () => [config.scroll_opacity_modifier],
+                (keys) => (config.scroll_opacity_modifier = keys[0])
+              }
+              held={heldKeys}
+              label="Key for changing transparency"
+            />
+          </div>
+        </div>
+      </section>
+    {/if}
+
+    {#if activeSection === 'behavior'}
+      <h1>Behavior</h1>
+
+      <h2 class="group-title">Dragging</h2>
+      <section class="card list">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">Start distance</span>
+            <span class="row-desc"
+              >How far the mouse travels before a window starts to follow. Raise
+              it if “Just move” feels too eager.</span
+            >
+          </div>
+          <div class="slider-group">
+            <input
+              type="range"
+              class="slider"
+              min="0"
+              max="200"
+              bind:value={config.drag_threshold}
+              aria-label="Start distance in pixels"
+            />
+            <output class="slider-value">{config.drag_threshold} px</output>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">Work on background windows</span>
+            <span class="row-desc"
+              >Move or resize a window without clicking it first.</span
+            >
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.allow_nonforeground}
+            aria-label="Work on background windows"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </div>
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">Bring to front when grabbed</span>
+            <span class="row-desc"
+              >Raise the window above others as soon as it starts moving.</span
+            >
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.raise_on_grab}
+            aria-label="Bring to front when grabbed"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </div>
+      </section>
+
+      <h2 class="group-title">Snapping</h2>
+      <section class="card list">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">Snap to screen edges</span>
+            <span class="row-desc"
+              >Drop a window at an edge or corner to fill that part of the
+              screen.</span
+            >
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.snap_enabled}
+            aria-label="Snap to screen edges"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </div>
+        <div class="row" class:off={!config.snap_enabled}>
+          <div class="row-text">
+            <span class="row-label">Use Windows snap groups</span>
+            <span class="row-desc"
+              >Let go of the keys before the mouse to join a Windows 11 snap
+              group.</span
+            >
+          </div>
+          <Switch.Root
+            class="toggle"
+            bind:checked={config.snap_native}
+            disabled={!config.snap_enabled}
+            aria-label="Use Windows snap groups"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </div>
+      </section>
+
+      <h2 class="group-title">Startup</h2>
+      <section class="card list">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">Start with Windows</span>
+            <span class="row-desc">Glide waits in the system tray.</span>
+          </div>
+          <Switch.Root
+            class="toggle"
+            checked={autostartEnabled}
+            disabled={changingAutostart}
+            onCheckedChange={toggleAutostart}
+            aria-label="Start with Windows"
+          >
+            <Switch.Thumb class="thumb" />
+          </Switch.Root>
+        </div>
+        {#if autostartError}
+          <p class="error-text row-error">{autostartError}</p>
+        {/if}
+      </section>
+    {/if}
+
+    {#if activeSection === 'apps'}
+      <h1>Apps</h1>
+      <p class="lede">Choose where Glide's gestures work.</p>
+
+      <section class="card">
+        <RadioGroup.Root
+          class="segmented wide"
+          bind:value={config.filter_mode}
+          aria-label="Where Glide works"
+        >
+          <RadioGroup.Item class="segment" value="blacklist"
+            >Everywhere except…</RadioGroup.Item
+          >
+          <RadioGroup.Item class="segment" value="whitelist"
+            >Only in…</RadioGroup.Item
+          >
+        </RadioGroup.Root>
+        <p class="row-desc filter-hint">{filterHint}</p>
+
+        <div class="picker-row">
+          <Select.Root
+            type="single"
+            bind:value={runningProcessValue}
+            items={selectableRunningProcessItems}
+            onValueChange={onRunningProcessSelect}
+          >
+            <Select.Trigger
+              class="select-trigger"
+              aria-label="Add a running app"
+            >
+              <span class="glyph" aria-hidden="true">{GLYPH.add}</span>
+              <span class="select-value">Add a running app</span>
+              <span class="glyph caret" aria-hidden="true">{GLYPH.chevron}</span
+              >
+            </Select.Trigger>
+            <Select.Content class="select-content" sideOffset={4}>
+              {#if selectableRunningProcesses.length === 0}
+                <div class="select-empty">No other apps are running</div>
+              {:else}
+                {#each selectableRunningProcesses as proc (proc)}
+                  <Select.Item class="select-item" value={proc} label={proc}
+                    >{proc}</Select.Item
+                  >
+                {/each}
+              {/if}
+            </Select.Content>
+          </Select.Root>
+          <button
+            type="button"
+            class="button icon-button"
+            onclick={loadRunning}
+            aria-label="Refresh running apps"
+            title="Refresh running apps"
+          >
+            <span class="glyph" aria-hidden="true">{GLYPH.refresh}</span>
+          </button>
+        </div>
+
+        {#if config.filter_list.length > 0}
+          <ul class="app-list">
+            {#each config.filter_list as proc (proc)}
+              <li>
+                <span class="glyph app-glyph" aria-hidden="true"
+                  >{GLYPH.app}</span
+                >
+                <span class="app-name">{proc}</span>
+                <button
+                  type="button"
+                  class="icon-button subtle"
+                  onclick={() => removeProcess(proc)}
+                  aria-label="Remove {proc}"
+                  title="Remove"
+                >
+                  <span class="glyph" aria-hidden="true">{GLYPH.remove}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {:else if config.filter_mode === 'whitelist'}
+          <div class="infobar warning">
+            <span class="glyph" aria-hidden="true">{GLYPH.warning}</span>
+            <p>No apps are listed, so Glide works nowhere. Add an app above.</p>
+          </div>
+        {:else}
+          <p class="empty">No apps excluded. Glide works in every window.</p>
+        {/if}
+      </section>
+    {/if}
+
+    {#if activeSection === 'about'}
+      <h1>About</h1>
+
+      <section class="card about">
+        <img class="about-mark" src="/glide-mark.png" alt="" />
+        <div>
+          <h2>Glide</h2>
+          <p class="row-desc">
+            Move and resize any window with a few keys and the mouse.
+          </p>
+        </div>
+        <span class="version">{appVersion ? `v${appVersion}` : ''}</span>
+      </section>
+
+      <section class="card list">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">Made by Chanhyeok Son</span>
+            <span class="row-desc">Glide is free and open source.</span>
+          </div>
+          <div class="row-actions">
+            <button
+              type="button"
+              class="button"
+              onclick={() => openLink('author')}
+            >
+              GitHub
+              <span class="glyph small" aria-hidden="true"
+                >{GLYPH.external}</span
+              >
+            </button>
+            <button
+              type="button"
+              class="button"
+              onclick={() => openLink('repo')}
+            >
+              Source code
+              <span class="glyph small" aria-hidden="true"
+                >{GLYPH.external}</span
+              >
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <h2 class="group-title">Support</h2>
+      {#if supporter}
+        <section class="card thanks">
+          <span class="thanks-heart glyph" aria-hidden="true"
+            >{GLYPH.heart}</span
+          >
+          <div>
+            <h3>Thank you, {supporter}</h3>
+            <p class="row-desc">
+              You support Glide's development. It keeps the project going.
+            </p>
+          </div>
+        </section>
+      {:else}
+        <section class="card list">
+          <div class="row">
+            <div class="row-text">
+              <span class="row-label">Donate</span>
+              <span class="row-desc"
+                >If Glide saves you time, a small donation helps.</span
+              >
+            </div>
+            <div class="row-actions">
+              <button
+                type="button"
+                class="button accent"
+                onclick={() => openLink('sponsors')}
+              >
+                <span class="glyph" aria-hidden="true">{GLYPH.heart}</span>
+                GitHub Sponsors
+              </button>
+              <button
+                type="button"
+                class="button"
+                onclick={() => openLink('coffee')}
+              >
+                Buy me a coffee
+              </button>
+            </div>
+          </div>
+          {#if !storeBuild}
+            <form class="row code-row" onsubmit={redeemCode}>
+              <div class="row-text">
+                <label class="row-label" for="supporter-code"
+                  >Supporter code</label
+                >
+                <span class="row-desc"
+                  >Supporters get a code from the developer. Enter it to show
+                  your supporter badge.</span
+                >
+              </div>
+              <div class="code-field">
+                <input
+                  id="supporter-code"
+                  class="text-input"
+                  bind:this={codeInput}
+                  bind:value={supportCode}
+                  placeholder="GLIDE1-…"
+                  spellcheck="false"
+                  autocomplete="off"
+                  aria-invalid={redeemError ? 'true' : undefined}
+                  aria-describedby={redeemError ? 'code-error' : undefined}
+                />
+                <button
+                  type="submit"
+                  class="button"
+                  disabled={redeeming || !supportCode.trim()}
+                >
+                  {redeeming ? 'Checking…' : 'Redeem'}
+                </button>
+              </div>
+            </form>
+            {#if redeemError}
+              <p id="code-error" class="error-text row-error" role="alert">
+                {redeemError}
+              </p>
+            {/if}
+          {/if}
+        </section>
+      {/if}
+      {#if linkError}
+        <p class="error-text link-error" role="alert">{linkError}</p>
+      {/if}
+
+      <h2 class="group-title">Updates</h2>
+      <section class="card list">
+        <div class="row">
+          <div class="row-text">
+            {#if storeBuild}
+              <span class="row-label">Managed by Microsoft Store</span>
+              <span class="row-desc">The Store keeps Glide up to date.</span>
+            {:else if checkingUpdate}
+              <span class="row-label">Checking for updates…</span>
+            {:else if updateAvailable !== null}
+              <span class="row-label"
+                >Version {updateAvailable.version} is available</span
+              >
+              <span class="row-desc">Glide restarts after installing.</span>
+            {:else if updateCheckFailed}
+              <span class="row-label">Couldn't check for updates</span>
+              <span class="row-desc">Check your internet connection.</span>
+            {:else}
+              <span class="row-label">You're up to date</span>
+            {/if}
+          </div>
+          {#if !storeBuild && updateAvailable !== null}
+            <button
+              class="button accent"
+              onclick={installUpdate}
+              disabled={isUpdating ||
+                saving ||
+                hasUnsavedChanges ||
+                changingAutostart}
+            >
+              {isUpdating ? 'Installing…' : 'Install and restart'}
+            </button>
+          {:else if !storeBuild && updateCheckFailed}
+            <button class="button" onclick={checkForUpdate}>Try again</button>
+          {/if}
+        </div>
+        {#if updateError}
+          <p class="error-text row-error">{updateError}</p>
+        {/if}
+      </section>
+    {/if}
   </div>
+
+  <SupportDialog
+    open={supportPrompt && loaded}
+    onDonate={donateFromPrompt}
+    onLater={() => answerPrompt('later')}
+    onHaveCode={storeBuild ? undefined : enterCodeFromPrompt}
+  />
 </main>
 
 <style>
@@ -762,861 +1047,969 @@
 
   :global(html),
   :global(body) {
-    width: 560px;
-    height: 640px;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
     background: transparent;
-    color: #111827;
     color-scheme: light dark;
     -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
+  }
+
+  :global(:root) {
+    /* Fluent 2, light theme over Mica */
+    --text: rgb(0 0 0 / 0.896);
+    --text-secondary: rgb(0 0 0 / 0.62);
+    --text-disabled: rgb(0 0 0 / 0.36);
+    --card: rgb(255 255 255 / 0.7);
+    --card-hover: rgb(249 249 249 / 0.6);
+    --card-stroke: rgb(0 0 0 / 0.0578);
+    --card-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+    --divider: rgb(0 0 0 / 0.0803);
+    --subtle-hover: rgb(0 0 0 / 0.0373);
+    --subtle-press: rgb(0 0 0 / 0.0241);
+    --control: rgb(255 255 255 / 0.7);
+    --control-hover: rgb(249 249 249 / 0.5);
+    --control-stroke: rgb(0 0 0 / 0.0578);
+    --control-stroke-bottom: rgb(0 0 0 / 0.1622);
+    --accent: #005fb8;
+    --accent-hover: #196ebf;
+    --accent-deep: #003e92;
+    --on-accent: #ffffff;
+    --focus: rgb(0 0 0 / 0.896);
+    --key-bg: #fbfbfb;
+    --key-hover: #f3f3f3;
+    --key-stroke: rgb(0 0 0 / 0.16);
+    --held-ring: rgb(0 95 184 / 0.45);
+    --switch-off-stroke: rgb(0 0 0 / 0.6);
+    --caution-bg: rgb(255 244 206 / 0.9);
+    --caution-fg: #9d5d00;
+    --critical-bg: rgb(253 231 233 / 0.9);
+    --critical-fg: #c42b1c;
+    --success: #0f7b0f;
+    --scroll-thumb: rgb(0 0 0 / 0.35);
+    --surface-stroke: rgb(117 117 117 / 0.4);
+    --dialog: #ffffff;
+    --dialog-footer: #f3f3f3;
+    --smoke: rgb(0 0 0 / 0.3);
+    --input: rgb(255 255 255 / 0.7);
+    --input-focus: #ffffff;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :global(:root) {
+      --text: #ffffff;
+      --text-secondary: rgb(255 255 255 / 0.786);
+      --text-disabled: rgb(255 255 255 / 0.3628);
+      --card: rgb(255 255 255 / 0.0512);
+      --card-hover: rgb(255 255 255 / 0.0837);
+      --card-stroke: rgb(0 0 0 / 0.1);
+      --card-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+      --divider: rgb(255 255 255 / 0.0837);
+      --subtle-hover: rgb(255 255 255 / 0.0605);
+      --subtle-press: rgb(255 255 255 / 0.0419);
+      --control: rgb(255 255 255 / 0.0605);
+      --control-hover: rgb(255 255 255 / 0.0837);
+      --control-stroke: rgb(255 255 255 / 0.0698);
+      --control-stroke-bottom: rgb(255 255 255 / 0.0465);
+      --accent: #60cdff;
+      --accent-hover: #5bbae8;
+      --accent-deep: #3aa0d4;
+      --on-accent: #000000;
+      --focus: #ffffff;
+      --key-bg: #3a3a3a;
+      --key-hover: #444444;
+      --key-stroke: rgb(0 0 0 / 0.55);
+      --held-ring: rgb(96 205 255 / 0.5);
+      --switch-off-stroke: rgb(255 255 255 / 0.786);
+      --caution-bg: rgb(67 53 25 / 0.85);
+      --caution-fg: #fce100;
+      --critical-bg: rgb(68 39 38 / 0.85);
+      --critical-fg: #ff99a4;
+      --success: #6ccb5f;
+      --scroll-thumb: rgb(255 255 255 / 0.35);
+      --surface-stroke: rgb(117 117 117 / 0.4);
+      --dialog: #2b2b2b;
+      --dialog-footer: #202020;
+      --smoke: rgb(0 0 0 / 0.3);
+      --input: rgb(255 255 255 / 0.0605);
+      --input-focus: rgb(30 30 30 / 0.7);
+    }
+  }
+
+  :global(::selection) {
+    background: var(--accent);
+    color: var(--on-accent);
   }
 
   main {
-    --bg-base: #eef3fb;
-    --bg-tint: #f9fbff;
-    --surface: rgb(255 255 255 / 0.76);
-    --surface-strong: rgb(255 255 255 / 0.9);
-    --surface-alt: rgb(247 250 255 / 0.72);
-    --line: rgb(125 145 176 / 0.26);
-    --line-hover: rgb(86 113 153 / 0.42);
-    --text: #18243a;
-    --muted: #4a5d7a;
-    --muted-2: #667899;
-    --accent: #005fb8;
-    --accent-strong: #155fb7;
-    --toggle-off: #d9e4f4;
-    --thumb-off: #60708a;
-    --thumb-on: #ffffff;
-    --field-bg: rgb(255 255 255 / 0.72);
-    --field-line: rgb(106 132 170 / 0.34);
-    --chip-bg: rgb(238 246 255 / 0.8);
-    --chip-line: rgb(106 132 170 / 0.35);
-    --chip-text: #2f4668;
-    --chip-x: #496086;
-    --chip-x-hover: #142743;
-    --seg-bg: rgb(230 239 252 / 0.84);
-    --seg-line: rgb(106 132 170 / 0.34);
-    --seg-active: rgb(255 255 255 / 0.84);
-    --seg-hover: rgb(244 248 255 / 0.9);
-    --btn-bg: rgb(255 255 255 / 0.78);
-    --btn-line: rgb(106 132 170 / 0.34);
-    --btn-hover: rgb(245 250 255 / 0.94);
-    --scroll-thumb: rgb(114 137 169 / 0.55);
-    --scroll-thumb-hover: rgb(79 106 143 / 0.72);
-
-    position: relative;
-    display: block;
-    height: 640px;
-    overflow: hidden;
-    background: transparent;
+    display: grid;
+    grid-template-columns: 208px minmax(0, 1fr);
+    height: 100vh;
     color: var(--text);
-    font-family:
-      'Segoe UI Variable Text', 'Segoe UI', 'Noto Sans KR', sans-serif;
-    font-size: 13px;
-    line-height: 1.36;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 20px;
     opacity: 0;
-    transform: translateY(6px);
-    transition:
-      opacity 180ms ease,
-      transform 220ms ease;
-  }
-
-  main::before {
-    content: none;
+    transition: opacity 160ms cubic-bezier(0.1, 0.9, 0.2, 1);
   }
 
   main.loaded {
     opacity: 1;
-    transform: none;
   }
 
-  .app-shell {
-    position: relative;
-    z-index: 1;
-    height: 100%;
-    display: grid;
-    grid-template-columns: 148px minmax(0, 1fr);
-    background: rgb(255 255 255 / 0.08);
-    backdrop-filter: blur(18px) saturate(130%);
-    border: 1px solid rgb(255 255 255 / 0.35);
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.58),
-      0 20px 48px rgb(31 60 100 / 0.18),
-      0 1px 1px rgb(51 66 91 / 0.15);
-  }
-
-  .sidebar {
-    border-right: 1px solid var(--line);
-    background: linear-gradient(
-      180deg,
-      rgb(255 255 255 / 0.44),
-      rgb(240 246 255 / 0.28)
-    );
-    padding: 16px 10px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .side-brand {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    padding: 0 4px;
-  }
-
-  .side-brand-name {
-    color: var(--text);
+  :global(.glyph) {
+    font-family: 'Segoe Fluent Icons', 'Segoe MDL2 Assets';
+    font-style: normal;
     font-size: 16px;
-    font-weight: 600;
-    letter-spacing: 0.2px;
-    line-height: 1.1;
+    line-height: 1;
   }
 
-  .side-brand-ver {
-    color: var(--muted-2);
-    font-size: 11px;
-    line-height: 1.2;
-  }
+  /* ---------- Navigation pane ---------- */
 
-  .side-nav {
+  .nav-pane {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    padding: 12px 8px 14px;
+    min-height: 0;
   }
 
-  .side-link {
-    border: 1px solid transparent;
-    background: transparent;
-    text-align: left;
-    color: var(--muted);
-    font-size: 12.5px;
-    padding: 8px 9px;
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 10px 18px;
+  }
+
+  .brand-mark {
+    width: 36px;
+    height: 36px;
     border-radius: 8px;
-    cursor: pointer;
-    transition:
-      background 0.14s ease,
-      border-color 0.14s ease,
-      color 0.14s ease;
   }
 
-  .side-link:hover {
-    background: rgb(255 255 255 / 0.48);
-    border-color: rgb(106 132 170 / 0.22);
-    color: var(--text);
+  .brand-text {
+    display: flex;
+    flex-direction: column;
   }
 
-  .side-link.active {
-    background: color-mix(in oklab, var(--accent) 20%, rgb(255 255 255 / 0.78));
-    border-color: color-mix(in oklab, var(--accent) 30%, transparent);
-    color: #15396f;
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.44);
+  .brand-name {
+    font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 20px;
   }
 
-  .side-link:focus-visible {
-    outline: 2px solid color-mix(in oklab, var(--accent) 26%, transparent);
-    outline-offset: 1px;
+  .brand-sub {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 16px;
   }
 
-  .side-note {
-    margin-top: auto;
-    color: var(--muted-2);
-    font-size: 10.5px;
-    line-height: 1.4;
-    padding: 0 4px;
+  nav {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
   }
 
-  .content {
-    overflow-y: auto;
-    padding: 14px 14px 12px;
-  }
-
-  .content::-webkit-scrollbar {
-    width: 11px;
-  }
-
-  .content::-webkit-scrollbar-track {
+  .nav-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    height: 36px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 4px;
     background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
   }
 
-  .content::-webkit-scrollbar-thumb {
+  .nav-item:hover {
+    background: var(--subtle-hover);
+  }
+
+  .nav-item:active {
+    background: var(--subtle-press);
+    color: var(--text-secondary);
+  }
+
+  .nav-item.active {
+    background: var(--subtle-hover);
+    font-weight: 600;
+  }
+
+  .nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 3px;
+    height: 16px;
+    border-radius: 2px;
+    background: var(--accent);
+    transform: translateY(-50%);
+    animation: pill 220ms cubic-bezier(0.1, 0.9, 0.2, 1);
+  }
+
+  @keyframes pill {
+    from {
+      height: 4px;
+    }
+  }
+
+  .save-state {
+    margin-top: auto;
+    padding: 0 12px;
+    display: grid;
+    gap: 8px;
+    justify-items: start;
+  }
+
+  .caption {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    transition: background 160ms ease;
+  }
+
+  .dot.busy {
+    background: var(--accent);
+  }
+
+  /* ---------- Page ---------- */
+
+  .page {
+    min-height: 0;
+    overflow-y: auto;
+    padding: 22px 24px 28px 12px;
+    scrollbar-gutter: stable;
+  }
+
+  .page::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .page::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 6px;
     background: var(--scroll-thumb);
-    border: 2px solid transparent;
     background-clip: content-box;
-    border-radius: 999px;
   }
 
-  .content::-webkit-scrollbar-thumb:hover {
-    background: var(--scroll-thumb-hover);
-    background-clip: content-box;
+  h1 {
+    font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif;
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 36px;
+    margin-bottom: 6px;
+  }
+
+  .lede {
+    color: var(--text-secondary);
+    max-width: 52ch;
+    margin-bottom: 18px;
+  }
+
+  h1 + .card,
+  h1 + .group-title {
+    margin-top: 14px;
   }
 
   .group-title {
-    color: var(--muted);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
-    margin-bottom: 9px;
-    letter-spacing: 0.1px;
-  }
-
-  .section-spacer {
-    border: none;
-    border-top: 1px solid var(--line);
-    margin: 14px 0;
-    opacity: 0.6;
-  }
-
-  .panel-divider {
-    border: none;
-    border-top: 1px solid var(--line);
-    margin: 10px 0;
-    opacity: 0.4;
-  }
-
-  .panel-title {
-    color: var(--muted);
-    margin-bottom: 7px;
-    font-size: 12.5px;
-    font-weight: 600;
-    line-height: 1.2;
+    line-height: 20px;
+    margin: 22px 0 8px 2px;
   }
 
   .card {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 11px;
-    backdrop-filter: none;
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.62),
-      0 7px 22px rgb(31 60 100 / 0.08);
-  }
-
-  .update-btn {
-    flex-shrink: 0;
-    padding: 5px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-
-  .update-btn:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-  }
-  .mod-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 30px;
-  }
-
-  /* Holds the label + modifier selects. Dimmed/disabled when the feature is
-     off, while the enable toggle stays a sibling — so it remains clickable to
-     turn the feature back on. */
-  .mod-main {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .mod-label {
-    width: 44px;
-    flex-shrink: 0;
-    color: var(--text);
-    font-size: 13px;
-  }
-
-  .resize-pair {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .plus {
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1;
-  }
-
-  kbd {
-    display: inline-block;
-    border: 1px solid rgb(97 122 161 / 0.28);
-    border-radius: 5px;
-    padding: 1px 6px;
-    background: rgb(255 255 255 / 0.64);
-    color: var(--muted);
-    font-size: 10px;
-    line-height: 1.45;
-    font-family: 'Consolas', 'Cascadia Mono', ui-monospace, monospace;
-  }
-
-  .row-item {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .row-item + .row-item,
-  .row-item-group + .row-item-group {
-    margin-top: 7px;
-  }
-
-  .row-disabled {
-    opacity: 0.45;
-    pointer-events: none;
-  }
-
-  .row-label {
-    color: var(--text);
-    font-size: 13px;
-    line-height: 1.3;
-  }
-
-  .slider-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .slider {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 90px;
-    height: 4px;
-    border-radius: 999px;
-    background: var(--toggle-off);
-    cursor: pointer;
-    outline: none;
-    flex-shrink: 0;
-  }
-
-  .slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
-    transition: transform 0.1s ease;
-  }
-
-  .slider::-webkit-slider-thumb:hover {
-    transform: scale(1.15);
-  }
-
-  .slider:focus-visible {
-    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 25%, transparent);
-  }
-
-  .slider-value {
-    width: 36px;
-    text-align: right;
-    color: var(--muted);
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-  }
-
-  :global(.toggle) {
-    position: relative;
-    width: 38px;
-    height: 20px;
-    flex-shrink: 0;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--toggle-off);
-    cursor: pointer;
-    outline: none;
-    transition:
-      background 0.15s ease,
-      border-color 0.15s ease;
-  }
-
-  :global(.toggle .thumb) {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 14px;
-    height: 14px;
-    border-radius: 999px;
-    background: var(--thumb-off);
-    transition:
-      left 0.15s ease,
-      background 0.15s ease;
-    box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
-  }
-
-  :global(.toggle[data-state='checked']) {
-    background: var(--accent);
-    border-color: var(--accent-strong);
-  }
-
-  :global(.toggle[data-state='checked'] .thumb) {
-    left: 20px;
-    background: var(--thumb-on);
-  }
-
-  :global(.toggle:focus-visible) {
-    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 22%, transparent);
-  }
-
-  :global(.select-trigger) {
-    height: 29px;
-    min-width: 76px;
-    padding: 4px 9px;
-    border: 1px solid var(--field-line);
-    border-radius: 7px;
-    background: var(--field-bg);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 12px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    cursor: pointer;
-    outline: none;
-    transition:
-      border-color 0.15s ease,
-      background 0.15s ease;
-  }
-
-  :global(.select-trigger:hover) {
-    border-color: var(--line-hover);
-    background: rgb(255 255 255 / 0.86);
-  }
-
-  :global(.select-trigger:focus-visible) {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 20%, transparent);
-  }
-
-  :global(.select-value) {
-    white-space: nowrap;
-  }
-
-  :global(.select-caret) {
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1;
-  }
-
-  :global(.select-content) {
-    z-index: 40;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--surface-strong);
-    backdrop-filter: blur(14px) saturate(125%);
-    padding: 4px;
-    box-shadow:
-      0 14px 30px rgb(36 57 90 / 0.24),
-      0 2px 8px rgb(36 57 90 / 0.14);
-    min-width: 96px;
-    max-height: 220px;
-    overflow: auto;
-    transform-origin: var(--bits-select-content-transform-origin);
-  }
-
-  :global(.select-content[data-state='open']) {
-    animation: select-pop-in 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
-  }
-
-  :global(.select-content[data-side='top'][data-state='open']) {
-    animation-name: select-pop-in-up;
-  }
-
-  :global(.select-content::-webkit-scrollbar) {
-    width: 8px;
-  }
-
-  :global(.select-content::-webkit-scrollbar-thumb) {
-    background: var(--scroll-thumb);
-    border-radius: 999px;
-  }
-
-  :global(.select-content::-webkit-scrollbar-thumb:hover) {
-    background: var(--scroll-thumb-hover);
-  }
-
-  :global(.select-item) {
-    border-radius: 6px;
-    padding: 6px 8px;
-    font-size: 12px;
-    color: var(--text);
-    cursor: pointer;
-    outline: none;
-  }
-
-  :global(.select-item[data-highlighted]) {
-    background: rgb(226 238 255 / 0.9);
-  }
-
-  :global(.select-item[data-state='checked']) {
-    font-weight: 600;
-  }
-
-  .filter-top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  :global(.radio-tabs) {
-    display: inline-flex;
-    border: 1px solid var(--seg-line);
+    border: 1px solid var(--card-stroke);
     border-radius: 8px;
-    background: var(--seg-bg);
-    padding: 2px;
-    gap: 2px;
+    background: var(--card);
+    box-shadow: var(--card-shadow);
+    padding: 16px;
   }
 
-  :global(.rtab) {
-    display: flex;
+  .card + .card {
+    margin-top: 8px;
+  }
+
+  /* ---------- Gesture cards ---------- */
+
+  .card-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    padding: 5px 11px;
+    gap: 14px;
+  }
+
+  .card-icon {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
     border-radius: 6px;
-    color: var(--muted);
-    font-size: 12px;
-    cursor: pointer;
-    user-select: none;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 18px;
     transition:
-      background 0.15s ease,
-      color 0.15s ease;
+      background 160ms ease,
+      color 160ms ease;
   }
 
-  :global(.rtab[data-state='checked']) {
-    background: var(--seg-active);
-    color: var(--text);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.5);
+  .gesture.off .card-icon {
+    background: var(--subtle-hover);
+    color: var(--text-secondary);
   }
 
-  :global(.rtab[data-state='unchecked']:hover) {
-    background: var(--seg-hover);
-  }
-
-  .filter-hint {
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  .process-picker-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  :global(.process-select) {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .refresh-running-btn {
-    height: 29px;
-    padding: 4px 11px;
-    border: 1px solid var(--btn-line);
-    border-radius: 7px;
-    background: var(--btn-bg);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 12px;
+  h2 {
+    font-size: 14px;
     font-weight: 600;
-    cursor: pointer;
-    transition:
-      background 0.14s ease,
-      border-color 0.14s ease;
+    line-height: 20px;
   }
 
-  .refresh-running-btn:hover {
-    background: var(--btn-hover);
-    border-color: var(--line-hover);
-  }
-
-  .refresh-running-btn:focus-visible {
-    outline: 2px solid color-mix(in oklab, var(--accent) 22%, transparent);
-    outline-offset: 1px;
-  }
-
-  .running-empty {
-    padding: 7px 8px;
-    color: var(--muted-2);
-    font-size: 11px;
-  }
-
-  .pill-list {
+  .recipe {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    min-height: 28px;
-    margin-bottom: 8px;
-    align-content: flex-start;
-  }
-
-  .pill {
-    display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 2px 7px 2px 9px;
-    border: 1px solid var(--chip-line);
-    border-radius: 999px;
-    background: var(--chip-bg);
-    color: var(--chip-text);
-    font-size: 11px;
-    line-height: 1.4;
-    font-family: 'Consolas', 'Cascadia Mono', ui-monospace, monospace;
-  }
-
-  .pill-x {
-    display: flex;
-    align-items: center;
-    border: none;
-    background: none;
-    padding: 0;
-    color: var(--chip-x);
-    font-size: 14px;
-    line-height: 1;
-    cursor: pointer;
-    transition: color 0.15s ease;
-  }
-
-  .pill-x:hover {
-    color: var(--chip-x-hover);
-  }
-
-  .pill-empty {
-    color: var(--muted-2);
-    font-size: 11px;
-    line-height: 28px;
-    font-style: italic;
-  }
-
-  .about-card p {
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 1.45;
-    margin-top: 6px;
-  }
-
-  @keyframes select-pop-in {
-    from {
-      opacity: 0;
-      transform: translateY(-2px) scale(0.985);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
-
-  @keyframes select-pop-in-up {
-    from {
-      opacity: 0;
-      transform: translateY(2px) scale(0.985);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
-
-  .error-text {
-    color: #c94444;
-    font-size: 11px;
-    margin-top: 6px;
-    line-height: 1.4;
-  }
-
-  .row-desc {
-    color: var(--muted-2);
-    font-size: 11px;
-    line-height: 1.35;
+    gap: 3px 4px;
     margin-top: 2px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 20px;
   }
 
-  .mod-group + .mod-group {
-    margin-top: 9px;
-  }
-
-  .mod-desc {
-    color: var(--muted-2);
-    font-size: 11px;
-    line-height: 1.35;
-    margin-top: 3px;
-    display: block;
-  }
-
-  .whitelist-warning {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
-    margin-top: 8px;
-    padding: 8px 10px;
-    border-radius: 7px;
-    background: rgb(255 200 50 / 0.12);
-    border: 1px solid rgb(200 160 30 / 0.3);
-    color: #8a6d00;
-    font-size: 11.5px;
-    line-height: 1.4;
-  }
-
-  .warning-icon {
-    flex-shrink: 0;
-    font-size: 13px;
-    line-height: 1.3;
-  }
-
-  .blacklist-info {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
-    margin-top: 8px;
-    padding: 8px 10px;
-    border-radius: 7px;
-    background: rgb(100 160 255 / 0.08);
-    border: 1px solid rgb(100 140 200 / 0.25);
-    color: var(--muted);
-    font-size: 11.5px;
-    line-height: 1.4;
-  }
-
-  .info-icon {
-    flex-shrink: 0;
-    font-size: 13px;
-    line-height: 1.3;
-  }
-
-  .about-value {
-    color: var(--muted);
-    font-size: 12.5px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .about-new {
+  .recipe.ready {
     color: var(--accent);
     font-weight: 600;
   }
 
-  .update-action {
+  .gesture.off .recipe {
+    color: var(--text-disabled);
+  }
+
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 6px;
+    border: 1px solid var(--key-stroke);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--key-bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .plus {
+    color: var(--text-secondary);
+  }
+
+  .card-body {
+    display: grid;
+    gap: 14px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--divider);
+    transition: opacity 160ms ease;
+  }
+
+  .gesture.off .card-body {
+    opacity: 0.45;
+  }
+
+  .field {
+    display: grid;
+    gap: 8px;
+  }
+
+  .field-label {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 16px;
+  }
+
+  .field-label em {
+    margin-left: 6px;
+    color: var(--text-secondary);
+    font-style: normal;
+    font-weight: 400;
+  }
+
+  .note {
+    color: var(--caution-fg);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  /* ---------- Segmented control ---------- */
+
+  :global(.segmented) {
+    display: grid;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--control-stroke);
+    border-radius: 6px;
+    background: var(--subtle-press);
+  }
+
+  :global(.segment) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition:
+      background 120ms ease,
+      color 120ms ease;
+  }
+
+  :global(.segment:hover) {
+    background: var(--subtle-hover);
+    color: var(--text);
+  }
+
+  :global(.segment[data-state='checked']) {
+    background: var(--control);
+    color: var(--text);
+    font-weight: 600;
+    box-shadow:
+      0 0 0 1px var(--control-stroke),
+      0 1px 2px rgb(0 0 0 / 0.08);
+  }
+
+  :global(.segment:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  /* ---------- Rows ---------- */
+
+  .list {
+    padding: 0;
+  }
+
+  .row {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 64px;
+    padding: 12px 16px;
   }
 
-  .up-to-date-text {
-    color: var(--muted-2);
+  .list .row + .row {
+    border-top: 1px solid var(--divider);
+  }
+
+  .row.nested {
+    min-height: 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--divider);
+  }
+
+  .row.off {
+    opacity: 0.45;
+  }
+
+  .row-text {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .row-label {
+    line-height: 20px;
+  }
+
+  .row-desc {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  .row-error {
+    padding: 0 16px 12px;
+  }
+
+  /* ---------- Toggle switch (Fluent) ---------- */
+
+  :global(.toggle) {
+    position: relative;
+    flex: none;
+    width: 40px;
+    height: 20px;
+    border: 1px solid var(--switch-off-stroke);
+    border-radius: 10px;
+    background: transparent;
+    cursor: pointer;
+    transition:
+      background 120ms ease,
+      border-color 120ms ease;
+  }
+
+  :global(.toggle:hover) {
+    background: var(--subtle-hover);
+  }
+
+  :global(.toggle[data-state='checked']) {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  :global(.toggle[data-state='checked']:hover) {
+    background: var(--accent-hover);
+  }
+
+  :global(.toggle:disabled) {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  :global(.toggle:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  :global(.thumb) {
+    position: absolute;
+    top: 50%;
+    left: 4px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--switch-off-stroke);
+    transform: translateY(-50%);
+    transition:
+      left 160ms cubic-bezier(0.1, 0.9, 0.2, 1),
+      width 120ms ease,
+      height 120ms ease;
+  }
+
+  :global(.toggle:hover .thumb) {
+    width: 14px;
+    height: 14px;
+  }
+
+  :global(.thumb[data-state='checked']) {
+    left: 22px;
+    background: var(--on-accent);
+  }
+
+  :global(.toggle:hover .thumb[data-state='checked']) {
+    left: 21px;
+  }
+
+  /* ---------- Slider ---------- */
+
+  .slider-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: none;
+  }
+
+  .slider {
+    width: 120px;
+    accent-color: var(--accent);
+  }
+
+  .slider-value {
+    min-width: 46px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  /* ---------- Buttons, infobars ---------- */
+
+  :global(.button) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--control-stroke);
+    border-bottom-color: var(--control-stroke-bottom);
+    border-radius: 4px;
+    background: var(--control);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  :global(.button:hover:not(:disabled)) {
+    background: var(--control-hover);
+  }
+
+  :global(.button:disabled) {
+    color: var(--text-disabled);
+    cursor: default;
+  }
+
+  :global(.button.accent) {
+    border-color: var(--accent-deep);
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  :global(.button.accent:hover:not(:disabled)) {
+    background: var(--accent-hover);
+  }
+
+  :global(.button:focus-visible),
+  .icon-button:focus-visible,
+  .nav-item:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  .icon-button {
+    width: 32px;
+    padding: 0;
+  }
+
+  .icon-button.subtle {
+    display: grid;
+    place-items: center;
+    height: 28px;
+    width: 28px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .icon-button.subtle:hover {
+    background: var(--subtle-hover);
+    color: var(--text);
+  }
+
+  .icon-button.subtle .glyph {
+    font-size: 12px;
+  }
+
+  .infobar {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--card-stroke);
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 18px;
+  }
+
+  .infobar .glyph {
+    margin-top: 1px;
+  }
+
+  .infobar.warning {
+    background: var(--caution-bg);
+  }
+
+  .infobar.warning .glyph {
+    color: var(--caution-fg);
+  }
+
+  .infobar.error {
+    background: var(--critical-bg);
+  }
+
+  .infobar.error .glyph {
+    color: var(--critical-fg);
+  }
+
+  .card .infobar {
+    margin: 12px 0 0;
+  }
+
+  :global(.link-button) {
+    padding: 4px 2px;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  :global(.link-button:hover) {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  :global(.link-button:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+
+  .error-text {
+    color: var(--critical-fg);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  /* ---------- Apps ---------- */
+
+  :global(.segmented.wide) {
+    margin-bottom: 8px;
+  }
+
+  .filter-hint {
+    margin: 0 2px 14px;
+  }
+
+  .picker-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  :global(.select-trigger) {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--control-stroke);
+    border-bottom-color: var(--control-stroke-bottom);
+    border-radius: 4px;
+    background: var(--control);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  :global(.select-trigger:hover) {
+    background: var(--control-hover);
+  }
+
+  :global(.select-trigger:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  :global(.select-trigger .glyph) {
+    font-size: 12px;
+  }
+
+  :global(.select-value) {
+    flex: 1;
+  }
+
+  :global(.select-content) {
+    z-index: 20;
+    width: var(--bits-select-anchor-width);
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--card-stroke);
+    border-radius: 8px;
+    background: Canvas;
+    box-shadow: 0 8px 16px rgb(0 0 0 / 0.14);
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+    font-size: 14px;
+  }
+
+  :global(.select-item) {
+    padding: 7px 10px;
+    border-radius: 4px;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  :global(.select-item[data-highlighted]) {
+    background: var(--subtle-hover);
+  }
+
+  :global(.select-empty) {
+    padding: 8px 10px;
+    color: var(--text-secondary);
+  }
+
+  .app-list {
+    list-style: none;
+    margin-top: 12px;
+    border: 1px solid var(--divider);
+    border-radius: 6px;
+  }
+
+  .app-list li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 6px 6px 12px;
+  }
+
+  .app-list li + li {
+    border-top: 1px solid var(--divider);
+  }
+
+  .app-glyph {
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+
+  .app-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .empty {
+    margin-top: 14px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+
+  /* ---------- About ---------- */
+
+  .about {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .about-mark {
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
+  }
+
+  .version {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .glyph.small {
     font-size: 11px;
-    margin-top: 6px;
   }
 
-  @media (prefers-color-scheme: dark) {
-    :global(html),
-    :global(body) {
-      color: #e6edf9;
-      background: transparent;
-    }
-
-    main {
-      --bg-base: #0f1725;
-      --bg-tint: #172134;
-      --surface: rgb(29 40 59 / 0.7);
-      --surface-strong: rgb(23 33 49 / 0.9);
-      --surface-alt: rgb(33 44 66 / 0.72);
-      --line: rgb(167 194 235 / 0.2);
-      --line-hover: rgb(184 211 249 / 0.35);
-      --text: #e6edf9;
-      --muted: #b0c2de;
-      --muted-2: #8ea2c1;
-      --accent: #66b4ff;
-      --accent-strong: #5aa7f3;
-      --toggle-off: #33425e;
-      --thumb-off: #c2d2e8;
-      --thumb-on: #f6f9ff;
-      --field-bg: rgb(24 34 52 / 0.82);
-      --field-line: rgb(168 193 230 / 0.28);
-      --chip-bg: rgb(45 59 85 / 0.74);
-      --chip-line: rgb(168 193 230 / 0.3);
-      --chip-text: #d7e5fa;
-      --chip-x: #abc5e6;
-      --chip-x-hover: #f3f7ff;
-      --seg-bg: rgb(34 47 69 / 0.82);
-      --seg-line: rgb(168 193 230 / 0.28);
-      --seg-active: rgb(51 66 95 / 0.84);
-      --seg-hover: rgb(58 74 105 / 0.84);
-      --btn-bg: rgb(30 43 64 / 0.82);
-      --btn-line: rgb(168 193 230 / 0.28);
-      --btn-hover: rgb(42 58 84 / 0.84);
-      --scroll-thumb: rgb(141 168 206 / 0.52);
-      --scroll-thumb-hover: rgb(173 198 235 / 0.75);
-
-      background: transparent;
-    }
-
-    .app-shell {
-      background: rgb(17 25 39 / 0.2);
-      border-color: rgb(145 171 209 / 0.22);
-      box-shadow:
-        inset 0 1px 0 rgb(196 215 245 / 0.16),
-        0 24px 52px rgb(2 8 18 / 0.5),
-        0 1px 1px rgb(8 15 30 / 0.4);
-    }
-
-    .sidebar {
-      background: linear-gradient(
-        180deg,
-        rgb(30 42 62 / 0.42),
-        rgb(21 31 47 / 0.3)
-      );
-    }
-
-    .side-link.active {
-      color: #deebff;
-    }
-
-    :global(.select-item[data-highlighted]) {
-      background: rgb(72 96 134 / 0.75);
-    }
-
-    .update-btn {
-      background: var(--accent-strong);
-      border-color: var(--accent-strong);
-    }
-
-    .whitelist-warning {
-      background: rgb(255 200 50 / 0.08);
-      border-color: rgb(200 170 50 / 0.25);
-      color: #e0c050;
-    }
-
-    .blacklist-info {
-      background: rgb(100 160 255 / 0.06);
-      border-color: rgb(100 150 220 / 0.2);
-      color: var(--muted-2);
-    }
+  .row-actions {
+    display: flex;
+    flex: none;
+    gap: 8px;
   }
 
-  @media (max-width: 560px) {
-    :global(html),
-    :global(body),
-    main {
-      width: 100%;
-      min-width: 360px;
-    }
+  .code-row {
+    flex-wrap: wrap;
+  }
 
-    .app-shell {
-      grid-template-columns: 130px minmax(0, 1fr);
+  .code-field {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .text-input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--control-stroke);
+    border-bottom-color: var(--control-stroke-bottom);
+    border-radius: 4px;
+    background: var(--input);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    caret-color: var(--accent);
+  }
+
+  .text-input::placeholder {
+    color: var(--text-secondary);
+  }
+
+  .text-input:focus {
+    outline: none;
+    background: var(--input-focus);
+    border-bottom: 2px solid var(--accent);
+  }
+
+  .text-input[aria-invalid='true'] {
+    border-bottom: 2px solid var(--critical-fg);
+  }
+
+  .thanks {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .thanks-heart {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 18px;
+  }
+
+  .thanks h3 {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .supporter-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--accent);
+  }
+
+  .supporter-badge .glyph {
+    font-size: 10px;
+  }
+
+  .link-error {
+    margin-top: 8px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    main,
+    .nav-item.active::before,
+    :global(.thumb) {
+      transition: none;
+      animation: none;
     }
   }
 </style>

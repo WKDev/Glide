@@ -3,6 +3,7 @@ mod config;
 mod hook;
 mod overlay;
 mod snap;
+pub mod support;
 mod window_manager;
 
 use std::sync::Arc;
@@ -88,6 +89,9 @@ pub fn run() {
             hook::set_enabled(enabled);
             let hook_ready = hook::start_hook_thread(config);
             build_tray(app, enabled, hook_ready)?;
+            if support::prompt_due(app.handle()) {
+                show_main_window(app.handle());
+            }
             log::info!("setup complete — hook_ready={}", hook_ready);
 
             Ok(())
@@ -105,6 +109,10 @@ pub fn run() {
             commands::get_running_processes,
             commands::get_app_status,
             commands::store_autostart,
+            support::get_support_status,
+            support::redeem_supporter_code,
+            support::answer_support_prompt,
+            support::open_link,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -113,7 +121,7 @@ pub fn run() {
 fn load_config(app: &tauri::App) -> AppConfig {
     match app.store_builder("config.json").disable_auto_save().build() {
         Ok(store) => match store.get("config") {
-            Some(val) => match serde_json::from_value(val.clone()) {
+            Some(val) => match AppConfig::from_stored(val.clone()) {
                 Ok(cfg) => cfg,
                 Err(e) => {
                     log::warn!("config deserialize failed, using defaults: {}", e);

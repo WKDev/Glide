@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use tauri::State;
 use tauri_plugin_store::StoreExt;
 
-use crate::config::AppConfig;
+use crate::config::{self, AppConfig};
 use crate::hook;
 use crate::window_manager;
 
@@ -33,6 +33,14 @@ pub fn set_config(
 }
 
 fn validate_config(config: &AppConfig) -> Result<(), String> {
+    for (name, keys) in [
+        ("move_modifiers", &config.move_modifiers),
+        ("resize_modifiers", &config.resize_modifiers),
+    ] {
+        if !config::is_valid_combo(keys) {
+            return Err(format!("{name} must have one to three distinct keys"));
+        }
+    }
     for (name, value) in [
         ("snap_threshold", config.snap_threshold),
         ("drag_threshold", config.drag_threshold),

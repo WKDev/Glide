@@ -1,14 +1,16 @@
 export type ModifierKey = 'alt' | 'ctrl' | 'shift' | 'win';
 export type FilterMode = 'whitelist' | 'blacklist';
 export type ResizeMode = 'quadrant' | 'absolute';
+export type GestureTrigger = 'click' | 'pan';
 
 export interface AppConfig {
   enabled: boolean;
   move_enabled: boolean;
   resize_enabled: boolean;
-  move_modifier: ModifierKey;
-  resize_modifier_1: ModifierKey;
-  resize_modifier_2: ModifierKey;
+  move_modifiers: ModifierKey[];
+  move_trigger: GestureTrigger;
+  resize_modifiers: ModifierKey[];
+  resize_trigger: GestureTrigger;
   resize_mode: ResizeMode;
   filter_mode: FilterMode;
   filter_list: string[];
@@ -27,9 +29,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   enabled: true,
   move_enabled: true,
   resize_enabled: true,
-  move_modifier: 'alt',
-  resize_modifier_1: 'alt',
-  resize_modifier_2: 'shift',
+  move_modifiers: ['alt'],
+  move_trigger: 'click',
+  resize_modifiers: ['alt', 'shift'],
+  resize_trigger: 'click',
   resize_mode: 'quadrant',
   filter_mode: 'blacklist',
   filter_list: [],
@@ -44,9 +47,52 @@ export const DEFAULT_CONFIG: AppConfig = {
   snap_native: true,
 };
 
+export const MAX_COMBO_KEYS = 3;
+
 export const MODIFIER_OPTIONS: { value: ModifierKey; label: string }[] = [
-  { value: 'alt', label: 'Alt' },
   { value: 'ctrl', label: 'Ctrl' },
+  { value: 'alt', label: 'Alt' },
   { value: 'shift', label: 'Shift' },
   { value: 'win', label: 'Win' },
 ];
+
+/** Windows shortcut order: Win + Ctrl + Alt + Shift. */
+const COMBO_ORDER: ModifierKey[] = ['win', 'ctrl', 'alt', 'shift'];
+
+export function orderCombo(keys: ModifierKey[]): ModifierKey[] {
+  return [...new Set(keys)].sort(
+    (a, b) => COMBO_ORDER.indexOf(a) - COMBO_ORDER.indexOf(b)
+  );
+}
+
+export const sortCombo = orderCombo;
+
+export function modifierLabel(key: ModifierKey): string {
+  return MODIFIER_OPTIONS.find((o) => o.value === key)?.label ?? key;
+}
+
+export const keyLabel = modifierLabel;
+
+export function comboLabel(keys: ModifierKey[]): string {
+  return sortCombo(keys).map(keyLabel).join(' + ');
+}
+
+export function sameCombo(a: ModifierKey[], b: ModifierKey[]): boolean {
+  const x = sortCombo(a);
+  const y = sortCombo(b);
+  return x.length === y.length && x.every((key, i) => key === y[i]);
+}
+
+/**
+ * Add or remove one key, keeping one to three keys.
+ * Returns the unchanged combination when the change is not allowed.
+ */
+export function toggleComboKey(
+  keys: ModifierKey[],
+  key: ModifierKey
+): ModifierKey[] {
+  if (keys.includes(key)) {
+    return keys.length > 1 ? sortCombo(keys.filter((k) => k !== key)) : keys;
+  }
+  return keys.length < MAX_COMBO_KEYS ? sortCombo([...keys, key]) : keys;
+}

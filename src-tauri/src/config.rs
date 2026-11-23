@@ -25,6 +25,18 @@ pub enum ResizeMode {
     Absolute,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GestureTrigger {
+    /// Hold the modifiers and drag with a mouse button.
+    Click,
+    /// Hold the modifiers and move the mouse past the drag threshold.
+    Pan,
+}
+
+/// A gesture fires only on this exact set of modifier keys.
+pub const MAX_COMBO_KEYS: usize = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub enabled: bool,
@@ -32,9 +44,14 @@ pub struct AppConfig {
     pub move_enabled: bool,
     #[serde(default = "default_resize_enabled")]
     pub resize_enabled: bool,
-    pub move_modifier: ModifierKey,
-    pub resize_modifier_1: ModifierKey,
-    pub resize_modifier_2: ModifierKey,
+    #[serde(default = "default_move_modifiers")]
+    pub move_modifiers: Vec<ModifierKey>,
+    #[serde(default = "default_trigger")]
+    pub move_trigger: GestureTrigger,
+    #[serde(default = "default_resize_modifiers")]
+    pub resize_modifiers: Vec<ModifierKey>,
+    #[serde(default = "default_trigger")]
+    pub resize_trigger: GestureTrigger,
     #[serde(default = "default_resize_mode")]
     pub resize_mode: ResizeMode,
     pub filter_mode: FilterMode,
@@ -61,6 +78,18 @@ fn default_resize_enabled() -> bool {
     true
 }
 
+fn default_move_modifiers() -> Vec<ModifierKey> {
+    vec![ModifierKey::Alt]
+}
+
+fn default_resize_modifiers() -> Vec<ModifierKey> {
+    vec![ModifierKey::Alt, ModifierKey::Shift]
+}
+
+fn default_trigger() -> GestureTrigger {
+    GestureTrigger::Click
+}
+
 fn default_resize_mode() -> ResizeMode {
     ResizeMode::Quadrant
 }
@@ -83,9 +112,10 @@ impl Default for AppConfig {
             enabled: true,
             move_enabled: true,
             resize_enabled: true,
-            move_modifier: ModifierKey::Alt,
-            resize_modifier_1: ModifierKey::Alt,
-            resize_modifier_2: ModifierKey::Shift,
+            move_modifiers: default_move_modifiers(),
+            move_trigger: GestureTrigger::Click,
+            resize_modifiers: default_resize_modifiers(),
+            resize_trigger: GestureTrigger::Click,
             resize_mode: ResizeMode::Quadrant,
             filter_mode: FilterMode::Blacklist,
             filter_list: Vec::new(),
@@ -102,6 +132,58 @@ impl Default for AppConfig {
     }
 }
 
+impl AppConfig {
+    /// Load a stored config, converting the single-key fields written by
+    /// Glide 0.2 (`move_modifier`, `resize_modifier_1`/`_2`) into key sets.
+    pub fn from_stored(mut value: serde_json::Value) -> Result<Self, serde_json::Error> {
+        if let Some(object) = value.as_object_mut() {
+            if !object.contains_key("move_modifiers") {
+                if let Some(key) = object.remove("move_modifier") {
+                    object.insert("move_modifiers".into(), serde_json::Value::Array(vec![key]));
+                }
+            }
+            if !object.contains_key("resize_modifiers") {
+                let keys: Vec<_> = ["resize_modifier_1", "resize_modifier_2"]
+                    .iter()
+                    .filter_map(|name| object.remove(*name))
+                    .collect();
+                if !keys.is_empty() {
+                    object.insert("resize_modifiers".into(), serde_json::Value::Array(keys));
+                }
+            }
+        }
+        let mut config: Self = serde_json::from_value(value)?;
+        config.move_modifiers = normalize_combo(&config.move_modifiers, default_move_modifiers);
+        config.resize_modifiers =
+            normalize_combo(&config.resize_modifiers, default_resize_modifiers);
+        Ok(config)
+    }
+}
+
+/// Drop duplicate keys; fall back to the default when the set is empty or too large.
+fn normalize_combo(keys: &[ModifierKey], fallback: fn() -> Vec<ModifierKey>) -> Vec<ModifierKey> {
+    let mut unique = Vec::with_capacity(keys.len());
+    for key in keys {
+        if !unique.contains(key) {
+            unique.push(*key);
+        }
+    }
+    if unique.is_empty() || unique.len() > MAX_COMBO_KEYS {
+        fallback()
+    } else {
+        unique
+    }
+}
+
+/// A valid combination has one to three distinct keys.
+pub fn is_valid_combo(keys: &[ModifierKey]) -> bool {
+    (1..=MAX_COMBO_KEYS).contains(&keys.len())
+        && keys
+            .iter()
+            .enumerate()
+            .all(|(i, key)| !keys[..i].contains(key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,9 +194,13 @@ mod tests {
         assert_eq!(config.enabled, true);
         assert_eq!(config.move_enabled, true);
         assert_eq!(config.resize_enabled, true);
-        assert_eq!(config.move_modifier, ModifierKey::Alt);
-        assert_eq!(config.resize_modifier_1, ModifierKey::Alt);
-        assert_eq!(config.resize_modifier_2, ModifierKey::Shift);
+        assert_eq!(config.move_modifiers, vec![ModifierKey::Alt]);
+        assert_eq!(config.move_trigger, GestureTrigger::Click);
+        assert_eq!(
+            config.resize_modifiers,
+            vec![ModifierKey::Alt, ModifierKey::Shift]
+        );
+        assert_eq!(config.resize_trigger, GestureTrigger::Click);
         assert_eq!(config.resize_mode, ResizeMode::Quadrant);
         assert_eq!(config.filter_mode, FilterMode::Blacklist);
         assert_eq!(config.filter_list, Vec::<String>::new());
@@ -138,9 +224,10 @@ mod tests {
         assert_eq!(deserialized.enabled, original.enabled);
         assert_eq!(deserialized.move_enabled, original.move_enabled);
         assert_eq!(deserialized.resize_enabled, original.resize_enabled);
-        assert_eq!(deserialized.move_modifier, original.move_modifier);
-        assert_eq!(deserialized.resize_modifier_1, original.resize_modifier_1);
-        assert_eq!(deserialized.resize_modifier_2, original.resize_modifier_2);
+        assert_eq!(deserialized.move_modifiers, original.move_modifiers);
+        assert_eq!(deserialized.move_trigger, original.move_trigger);
+        assert_eq!(deserialized.resize_modifiers, original.resize_modifiers);
+        assert_eq!(deserialized.resize_trigger, original.resize_trigger);
         assert_eq!(deserialized.resize_mode, original.resize_mode);
         assert_eq!(deserialized.filter_mode, original.filter_mode);
         assert_eq!(deserialized.filter_list, original.filter_list);
@@ -167,9 +254,10 @@ mod tests {
             enabled: false,
             move_enabled: false,
             resize_enabled: false,
-            move_modifier: ModifierKey::Ctrl,
-            resize_modifier_1: ModifierKey::Win,
-            resize_modifier_2: ModifierKey::Ctrl,
+            move_modifiers: vec![ModifierKey::Ctrl, ModifierKey::Win, ModifierKey::Shift],
+            move_trigger: GestureTrigger::Pan,
+            resize_modifiers: vec![ModifierKey::Win, ModifierKey::Ctrl],
+            resize_trigger: GestureTrigger::Pan,
             resize_mode: ResizeMode::Absolute,
             filter_mode: FilterMode::Whitelist,
             filter_list: vec!["notepad.exe".to_string(), "calc.exe".to_string()],
@@ -189,9 +277,8 @@ mod tests {
         assert_eq!(deserialized.enabled, original.enabled);
         assert_eq!(deserialized.move_enabled, original.move_enabled);
         assert_eq!(deserialized.resize_enabled, original.resize_enabled);
-        assert_eq!(deserialized.move_modifier, original.move_modifier);
-        assert_eq!(deserialized.resize_modifier_1, original.resize_modifier_1);
-        assert_eq!(deserialized.resize_modifier_2, original.resize_modifier_2);
+        assert_eq!(deserialized.move_modifiers, original.move_modifiers);
+        assert_eq!(deserialized.resize_modifiers, original.resize_modifiers);
         assert_eq!(deserialized.resize_mode, original.resize_mode);
         assert_eq!(deserialized.filter_mode, original.filter_mode);
         assert_eq!(deserialized.filter_list, original.filter_list);
@@ -338,7 +425,7 @@ mod tests {
             "drag_threshold": 10,
             "snap_native": true
         });
-        let config: AppConfig = serde_json::from_value(json).expect("legacy config should load");
+        let config = AppConfig::from_stored(json).expect("legacy config should load");
         assert_eq!(config.move_enabled, true);
         assert_eq!(config.resize_enabled, true);
         assert_eq!(config.resize_mode, ResizeMode::Quadrant);
@@ -350,9 +437,10 @@ mod tests {
             enabled: true,
             move_enabled: true,
             resize_enabled: true,
-            move_modifier: ModifierKey::Alt,
-            resize_modifier_1: ModifierKey::Alt,
-            resize_modifier_2: ModifierKey::Shift,
+            move_modifiers: vec![ModifierKey::Alt],
+            move_trigger: GestureTrigger::Click,
+            resize_modifiers: vec![ModifierKey::Alt, ModifierKey::Shift],
+            resize_trigger: GestureTrigger::Click,
             resize_mode: ResizeMode::Quadrant,
             filter_mode: FilterMode::Whitelist,
             filter_list: vec![
@@ -378,6 +466,38 @@ mod tests {
         assert_eq!(deserialized.filter_list[0], "app1.exe");
         assert_eq!(deserialized.filter_list[1], "app2.exe");
         assert_eq!(deserialized.filter_list[2], "app3.exe");
+    }
+
+    #[test]
+    fn legacy_single_keys_become_combinations() {
+        let json = serde_json::json!({
+            "enabled": true,
+            "move_modifier": "ctrl",
+            "resize_modifier_1": "win",
+            "resize_modifier_2": "win",
+            "filter_mode": "blacklist",
+            "filter_list": [],
+            "autostart": false,
+            "allow_nonforeground": true,
+            "raise_on_grab": false,
+            "snap_enabled": true,
+            "snap_threshold": 20,
+            "scroll_opacity": true
+        });
+        let config = AppConfig::from_stored(json).expect("legacy config should load");
+        assert_eq!(config.move_modifiers, vec![ModifierKey::Ctrl]);
+        assert_eq!(config.resize_modifiers, vec![ModifierKey::Win]);
+        assert_eq!(config.resize_trigger, GestureTrigger::Click);
+    }
+
+    #[test]
+    fn combo_validation_limits_size_and_duplicates() {
+        use ModifierKey::*;
+        assert!(is_valid_combo(&[Alt]));
+        assert!(is_valid_combo(&[Ctrl, Alt, Shift]));
+        assert!(!is_valid_combo(&[]));
+        assert!(!is_valid_combo(&[Alt, Alt]));
+        assert!(!is_valid_combo(&[Ctrl, Alt, Shift, Win]));
     }
 
     #[test]
