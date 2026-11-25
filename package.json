@@ -28,7 +28,7 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run"
+    "test": "svelte-kit sync && vitest run"
   },
   "license": "MIT",
   "engines": {
