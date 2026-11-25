@@ -6,6 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/wkdev/glide)](https://github.com/wkdev/glide/releases)
 [![License](https://img.shields.io/github/license/wkdev/glide)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-Get%20it-0078D4?logo=microsoft)](https://apps.microsoft.com/detail/9NZSW979HJT8)
 
 A modifier key + mouse window move/resize utility for Windows. Hold a modifier key and use your mouse to move or resize any window without clicking the title bar.
 
@@ -28,7 +29,13 @@ A modifier key + mouse window move/resize utility for Windows. Hold a modifier k
 
 ## Installation
 
-Download the latest installer from the [GitHub Releases](https://github.com/wkdev/glide/releases) page:
+### Microsoft Store (recommended)
+
+Install Glide from the [Microsoft Store](https://apps.microsoft.com/detail/9NZSW979HJT8). The Store keeps Glide up to date automatically.
+
+### GitHub Releases
+
+Or download the latest installer from the [GitHub Releases](https://github.com/wkdev/glide/releases) page:
 
 - **NSIS Installer** (.exe) — Recommended for most users
 - **MSI Installer** (.msi) — Alternative Windows installer format
